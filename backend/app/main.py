@@ -1,16 +1,43 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from app.services.foundry import (
+    CHAT_MODEL,
+    EMBEDDING_MODEL,
+    foundry_status,
+    test_chat,
+)
+
+
+class TestChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=1000)
 
 
 app = FastAPI(title="Local RAG Assistant API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "foundryLocal": foundry_status(),
+        "chatModel": CHAT_MODEL,
+        "embeddingModel": EMBEDDING_MODEL,
+    }
+
+
+@app.post("/api/chat/test")
+def chat_test(request: TestChatRequest) -> dict[str, str]:
+    try:
+        answer = test_chat(request.message)
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+    return {"answer": answer, "model": CHAT_MODEL}

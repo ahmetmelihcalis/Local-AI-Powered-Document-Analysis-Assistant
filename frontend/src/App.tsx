@@ -5,10 +5,14 @@ type ConnectionStatus = "checking" | "ready" | "error";
 
 export default function App() {
   const [status, setStatus] = useState<ConnectionStatus>("checking");
+  const [foundryAvailable, setFoundryAvailable] = useState(false);
 
   useEffect(() => {
     getHealth()
-      .then(() => setStatus("ready"))
+      .then((health) => {
+        setStatus("ready");
+        setFoundryAvailable(health.foundryLocal === "available");
+      })
       .catch(() => setStatus("error"));
   }, []);
 
@@ -22,6 +26,9 @@ export default function App() {
     <main>
       <h1>Local RAG Assistant</h1>
       <p>{statusText}</p>
+      {status === "ready" && (
+        <p>Foundry Local is {foundryAvailable ? "available" : "unavailable"}</p>
+      )}
     </main>
   );
 }

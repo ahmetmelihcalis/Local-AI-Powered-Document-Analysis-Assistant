@@ -1,0 +1,44 @@
+from importlib.util import find_spec
+from threading import Lock
+
+from foundry_local_sdk import Configuration, FoundryLocalManager
+
+
+CHAT_MODEL = "phi-4-mini"
+EMBEDDING_MODEL = "qwen3-0.6b-embedding"
+
+_manager = None
+_lock = Lock()
+
+
+def foundry_status() -> str:
+    return "available" if find_spec("foundry_local_sdk") else "unavailable"
+
+
+def _get_manager():
+    global _manager
+
+    if _manager is None:
+        FoundryLocalManager.initialize(Configuration(app_name="local-rag-assistant"))
+        _manager = FoundryLocalManager.instance
+
+    return _manager
+
+
+def test_chat(message: str) -> str:
+    with _lock:
+        model = _get_manager().catalog.get_model(CHAT_MODEL)
+
+        if model is None:
+            raise RuntimeError(f"Model not found: {CHAT_MODEL}")
+
+        model.download()
+        model.load()
+
+        try:
+            client = model.get_chat_client()
+            client.settings.max_tokens = 128
+            response = client.complete_chat([{"role": "user", "content": message}])
+            return response.choices[0].message.content.strip()
+        finally:
+            model.unload()
