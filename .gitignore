@@ -5,6 +5,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+*.tsbuildinfo
 
 backend/data/documents/*
 !backend/data/documents/.gitkeep
