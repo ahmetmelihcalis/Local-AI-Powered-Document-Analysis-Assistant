@@ -1,4 +1,5 @@
 from importlib.util import find_spec
+from pathlib import Path
 from threading import Lock
 
 from foundry_local_sdk import Configuration, FoundryLocalManager
@@ -60,3 +61,18 @@ def create_embeddings(texts: list[str]) -> list[list[float]]:
             return [item.embedding for item in response.data]
         finally:
             model.unload()
+
+
+def get_embedding_tokenizer_path() -> Path:
+    model = _get_manager().catalog.get_model(EMBEDDING_MODEL)
+
+    if model is None:
+        raise RuntimeError(f"Model not found: {EMBEDDING_MODEL}")
+
+    model.download()
+    tokenizer_path = Path(model.get_path()) / "tokenizer.json"
+
+    if not tokenizer_path.is_file():
+        raise RuntimeError(f"Tokenizer not found for model: {EMBEDDING_MODEL}")
+
+    return tokenizer_path

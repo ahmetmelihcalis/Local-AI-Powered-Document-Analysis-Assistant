@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from app.services.foundry import (
+from app.services.foundry_service import (
     CHAT_MODEL,
     EMBEDDING_MODEL,
     foundry_status,
