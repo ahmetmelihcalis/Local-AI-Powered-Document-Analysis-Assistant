@@ -5,7 +5,7 @@ from foundry_local_sdk import Configuration, FoundryLocalManager
 
 
 CHAT_MODEL = "phi-4-mini"
-EMBEDDING_MODEL = "qwen3-0.6b-embedding"
+EMBEDDING_MODEL = "qwen3-embedding-0.6b"
 
 _manager = None
 _lock = Lock()
@@ -40,5 +40,23 @@ def test_chat(message: str) -> str:
             client.settings.max_tokens = 128
             response = client.complete_chat([{"role": "user", "content": message}])
             return response.choices[0].message.content.strip()
+        finally:
+            model.unload()
+
+
+def create_embeddings(texts: list[str]) -> list[list[float]]:
+    with _lock:
+        model = _get_manager().catalog.get_model(EMBEDDING_MODEL)
+
+        if model is None:
+            raise RuntimeError(f"Model not found: {EMBEDDING_MODEL}")
+
+        model.download()
+        model.load()
+
+        try:
+            client = model.get_embedding_client()
+            response = client.generate_embeddings(texts)
+            return [item.embedding for item in response.data]
         finally:
             model.unload()
