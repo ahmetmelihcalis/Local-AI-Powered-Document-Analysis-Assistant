@@ -1,7 +1,11 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from app.database import initialize_database
 from app.services.foundry_service import (
     CHAT_MODEL,
     EMBEDDING_MODEL,
@@ -14,7 +18,13 @@ class TestChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=1000)
 
 
-app = FastAPI(title="Local RAG Assistant API")
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    initialize_database()
+    yield
+
+
+app = FastAPI(title="Local RAG Assistant API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
