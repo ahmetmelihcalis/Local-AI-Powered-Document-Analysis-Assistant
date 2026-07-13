@@ -7,6 +7,7 @@ from foundry_local_sdk import Configuration, FoundryLocalManager
 
 CHAT_MODEL = "phi-4-mini"
 EMBEDDING_MODEL = "qwen3-embedding-0.6b"
+EMBEDDING_BATCH_SIZE = 16
 
 _manager = None
 _lock = Lock()
@@ -46,6 +47,9 @@ def test_chat(message: str) -> str:
 
 
 def create_embeddings(texts: list[str]) -> list[list[float]]:
+    if not texts:
+        return []
+
     with _lock:
         model = _get_manager().catalog.get_model(EMBEDDING_MODEL)
 
@@ -57,8 +61,15 @@ def create_embeddings(texts: list[str]) -> list[list[float]]:
 
         try:
             client = model.get_embedding_client()
-            response = client.generate_embeddings(texts)
-            return [item.embedding for item in response.data]
+            embeddings: list[list[float]] = []
+
+            for start in range(0, len(texts), EMBEDDING_BATCH_SIZE):
+                response = client.generate_embeddings(
+                    texts[start : start + EMBEDDING_BATCH_SIZE]
+                )
+                embeddings.extend(item.embedding for item in response.data)
+
+            return embeddings
         finally:
             model.unload()
 
