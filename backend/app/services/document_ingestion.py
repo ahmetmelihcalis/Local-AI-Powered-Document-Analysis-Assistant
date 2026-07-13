@@ -9,6 +9,8 @@ from app.repositories.document_repository import (
     ChunkInput,
     add_chunks,
     create_document,
+    delete_document,
+    get_document,
     get_document_by_hash,
     list_documents,
     update_document_status,
@@ -203,3 +205,22 @@ def ingest_document(
         if isinstance(error, DocumentIngestionError):
             raise
         raise DocumentIngestionError(str(error)) from error
+
+
+def delete_ingested_document(
+    document_id: int,
+    *,
+    database_path: Path = DATABASE_PATH,
+    documents_dir: Path = DOCUMENTS_DIR,
+) -> bool:
+    document = get_document(document_id, database_path)
+
+    if document is None:
+        return False
+
+    if not delete_document(document_id, database_path):
+        return False
+
+    stored_path = documents_dir / Path(document["stored_name"]).name
+    stored_path.unlink(missing_ok=True)
+    return True

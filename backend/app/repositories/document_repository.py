@@ -80,6 +80,19 @@ def list_documents(database_path: Path = DATABASE_PATH) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def get_document(
+    document_id: int,
+    database_path: Path = DATABASE_PATH,
+) -> dict[str, Any] | None:
+    with get_connection(database_path) as connection:
+        row = connection.execute(
+            "SELECT * FROM documents WHERE id = ?",
+            (document_id,),
+        ).fetchone()
+
+    return dict(row) if row else None
+
+
 def get_document_by_hash(
     content_hash: str,
     database_path: Path = DATABASE_PATH,

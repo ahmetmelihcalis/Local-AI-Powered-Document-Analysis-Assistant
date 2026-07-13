@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from app.database import initialize_database
+from app.routers.documents import router as documents_router
 from app.services.foundry_service import (
     CHAT_MODEL,
     EMBEDDING_MODEL,
@@ -28,9 +29,10 @@ app = FastAPI(title="Local RAG Assistant API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
+app.include_router(documents_router)
 
 
 @app.get("/api/health")
