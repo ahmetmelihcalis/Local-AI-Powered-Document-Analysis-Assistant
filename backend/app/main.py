@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from app.database import initialize_database
+from app.routers.chat import router as chat_router
 from app.routers.documents import router as documents_router
 from app.services.foundry_service import (
     CHAT_MODEL,
@@ -33,6 +34,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(documents_router)
+app.include_router(chat_router)
 
 
 @app.get("/api/health")

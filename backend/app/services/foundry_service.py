@@ -28,6 +28,14 @@ def _get_manager():
 
 
 def test_chat(message: str) -> str:
+    return generate_chat([{"role": "user", "content": message}], max_tokens=128)
+
+
+def generate_chat(
+    messages: list[dict[str, str]],
+    *,
+    max_tokens: int = 192,
+) -> str:
     with _lock:
         model = _get_manager().catalog.get_model(CHAT_MODEL)
 
@@ -39,8 +47,12 @@ def test_chat(message: str) -> str:
 
         try:
             client = model.get_chat_client()
-            client.settings.max_tokens = 128
-            response = client.complete_chat([{"role": "user", "content": message}])
+            client.settings.max_tokens = max_tokens
+            client.settings.temperature = 0.1
+            client.settings.top_p = 0.9
+            client.settings.frequency_penalty = 0.5
+            client.settings.random_seed = 42
+            response = client.complete_chat(messages)
             return response.choices[0].message.content.strip()
         finally:
             model.unload()
