@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import {
   ChatSource,
   DocumentResponse,
@@ -6,6 +6,7 @@ import {
   getHealth,
   Language,
   sendQuestion,
+  uploadDocument,
 } from "./api";
 import styles from "./App.module.css";
 
@@ -29,6 +30,10 @@ export default function App() {
   const [documents, setDocuments] = useState<DocumentResponse[]>([]);
   const [documentsLoading, setDocumentsLoading] = useState(true);
   const [documentsError, setDocumentsError] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     getHealth()
@@ -51,6 +56,33 @@ export default function App() {
     ready: "Local AI is ready",
     error: "Backend connection failed",
   }[status];
+
+  async function handleDocumentUpload(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!selectedFile || isUploading) {
+      return;
+    }
+
+    setIsUploading(true);
+    setUploadError(null);
+
+    try {
+      const uploadedDocument = await uploadDocument(selectedFile);
+      setDocuments((current) => [uploadedDocument, ...current]);
+      setDocumentsError(false);
+      setSelectedFile(null);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    } catch (error) {
+      setUploadError(
+        error instanceof Error ? error.message : "The document could not be uploaded.",
+      );
+    } finally {
+      setIsUploading(false);
+    }
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -135,6 +167,33 @@ export default function App() {
             <span>{documents.length}/20</span>
           </div>
 
+          <form className={styles.uploadForm} onSubmit={handleDocumentUpload}>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".txt,.md,.pdf,.docx"
+              aria-label="Choose a document"
+              onChange={(event) =>
+                setSelectedFile(event.target.files?.[0] ?? null)
+              }
+              disabled={isUploading}
+            />
+            <button
+              type="submit"
+              disabled={
+                !selectedFile ||
+                isUploading ||
+                status !== "ready" ||
+                !foundryAvailable
+              }
+            >
+              {isUploading ? "Uploading…" : "Upload"}
+            </button>
+          </form>
+          {uploadError && (
+            <p className={styles.documentError}>{uploadError}</p>
+          )}
+
           {documentsLoading && (
             <p className={styles.documentMessage}>Loading documents…</p>
           )}
@@ -153,7 +212,8 @@ export default function App() {
                     {document.originalName}
                   </strong>
                   <small className={styles.documentDetails}>
-                    {document.fileType.toUpperCase()} · {document.chunkCount} chunks · {document.status}
+                    {document.fileType.toUpperCase()} · {document.chunkCount} chunks ·{" "}
+                    {document.status}
                   </small>
                 </li>
               ))}

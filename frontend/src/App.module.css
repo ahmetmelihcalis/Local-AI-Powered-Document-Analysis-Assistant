@@ -118,6 +118,46 @@
   font-size: 12px;
 }
 
+.uploadForm {
+  display: grid;
+  gap: 9px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid #e1e6ef;
+}
+
+.uploadForm input {
+  width: 100%;
+  color: #5f6d84;
+  font-size: 11px;
+}
+
+.uploadForm input::file-selector-button {
+  padding: 7px 9px;
+  margin-right: 7px;
+  color: #2456ad;
+  font-weight: 700;
+  background: #edf3ff;
+  border: 1px solid #cad9f5;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.uploadForm button {
+  padding: 8px 12px;
+  color: #ffffff;
+  font-weight: 700;
+  background: #2563eb;
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.uploadForm button:disabled {
+  color: #8a94a6;
+  background: #e4e8ef;
+  cursor: not-allowed;
+}
+
 .documentMessage,
 .documentError {
   margin: 20px 0;
