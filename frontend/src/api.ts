@@ -25,6 +25,20 @@ export type ChatResponse = {
   durationMs: number;
 };
 
+export type DocumentStatus = "processing" | "ready" | "error";
+
+export type DocumentResponse = {
+  id: number;
+  originalName: string;
+  fileType: string;
+  fileSize: number;
+  language: string | null;
+  status: DocumentStatus;
+  chunkCount: number;
+  errorMessage: string | null;
+  createdAt: string;
+};
+
 export async function getHealth(): Promise<HealthResponse> {
   const response = await fetch(`${API_URL}/api/health`);
 
@@ -53,4 +67,46 @@ export async function sendQuestion(
   }
 
   return response.json();
+}
+
+export async function getDocuments(): Promise<DocumentResponse[]> {
+  const response = await fetch(`${API_URL}/api/documents`);
+
+  if (!response.ok) {
+    throw new Error("The document list could not be loaded.");
+  }
+
+  return response.json();
+}
+
+export async function uploadDocument(file: File): Promise<DocumentResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const response = await fetch(`${API_URL}/api/documents`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const error = (await response.json().catch(() => null)) as {
+      detail?: string;
+    } | null;
+    throw new Error(error?.detail ?? "The document could not be uploaded.");
+  }
+
+  return response.json();
+}
+
+export async function deleteDocument(documentId: number): Promise<void> {
+  const response = await fetch(`${API_URL}/api/documents/${documentId}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok) {
+    const error = (await response.json().catch(() => null)) as {
+      detail?: string;
+    } | null;
+    throw new Error(error?.detail ?? "The document could not be deleted.");
+  }
 }

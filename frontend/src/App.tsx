@@ -1,6 +1,8 @@
 import { FormEvent, useEffect, useState } from "react";
 import {
   ChatSource,
+  DocumentResponse,
+  getDocuments,
   getHealth,
   Language,
   sendQuestion,
@@ -24,6 +26,9 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isSending, setIsSending] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
+  const [documents, setDocuments] = useState<DocumentResponse[]>([]);
+  const [documentsLoading, setDocumentsLoading] = useState(true);
+  const [documentsError, setDocumentsError] = useState(false);
 
   useEffect(() => {
     getHealth()
@@ -32,6 +37,13 @@ export default function App() {
         setFoundryAvailable(health.foundryLocal === "available");
       })
       .catch(() => setStatus("error"));
+  }, []);
+
+  useEffect(() => {
+    getDocuments()
+      .then(setDocuments)
+      .catch(() => setDocumentsError(true))
+      .finally(() => setDocumentsLoading(false));
   }, []);
 
   const statusText = {
@@ -116,8 +128,41 @@ export default function App() {
         </div>
       </header>
 
-      <main className={styles.chatPanel}>
-        <section className={styles.messages} aria-live="polite">
+      <main className={styles.workspace}>
+        <aside className={styles.documentPanel} aria-label="Documents">
+          <div className={styles.documentPanelHeader}>
+            <h2>Documents</h2>
+            <span>{documents.length}/20</span>
+          </div>
+
+          {documentsLoading && (
+            <p className={styles.documentMessage}>Loading documents…</p>
+          )}
+          {documentsError && (
+            <p className={styles.documentError}>Documents could not be loaded.</p>
+          )}
+          {!documentsLoading && !documentsError && documents.length === 0 && (
+            <p className={styles.documentMessage}>No documents uploaded yet.</p>
+          )}
+
+          {documents.length > 0 && (
+            <ul className={styles.documentList}>
+              {documents.map((document) => (
+                <li className={styles.documentItem} key={document.id}>
+                  <strong title={document.originalName}>
+                    {document.originalName}
+                  </strong>
+                  <small className={styles.documentDetails}>
+                    {document.fileType.toUpperCase()} · {document.chunkCount} chunks · {document.status}
+                  </small>
+                </li>
+              ))}
+            </ul>
+          )}
+        </aside>
+
+        <section className={styles.chatPanel}>
+          <section className={styles.messages} aria-live="polite">
           {messages.length === 0 && (
             <div className={styles.emptyState}>
               <div className={styles.emptyIcon} aria-hidden="true">AI</div>
@@ -180,9 +225,9 @@ export default function App() {
               <p className={styles.thinking}>Searching the documents…</p>
             </div>
           )}
-        </section>
+          </section>
 
-        <div className={styles.composerArea}>
+          <div className={styles.composerArea}>
           {chatError && <p className={styles.errorMessage}>{chatError}</p>}
           <form className={styles.composer} onSubmit={handleSubmit}>
             <label className={styles.visuallyHidden} htmlFor="question">
@@ -207,7 +252,8 @@ export default function App() {
           <p className={styles.disclaimer}>
             The local model answers only from the selected document passages.
           </p>
-        </div>
+          </div>
+        </section>
       </main>
     </div>
   );
