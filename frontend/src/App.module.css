@@ -183,11 +183,34 @@
   border-radius: 9px;
 }
 
+.documentItemHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .documentItem strong {
   display: block;
+  min-width: 0;
   color: #28354c;
   font-size: 13px;
   overflow-wrap: anywhere;
+}
+
+.documentItemHeader button {
+  padding: 0;
+  color: #b42318;
+  font-size: 11px;
+  font-weight: 700;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.documentItemHeader button:disabled {
+  color: #98a2b3;
+  cursor: not-allowed;
 }
 
 .documentDetails {

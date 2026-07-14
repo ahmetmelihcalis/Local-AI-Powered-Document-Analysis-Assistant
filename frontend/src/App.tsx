@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import {
   ChatSource,
+  deleteDocument,
   DocumentResponse,
   getDocuments,
   getHealth,
@@ -33,6 +34,8 @@ export default function App() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [deletingDocumentId, setDeletingDocumentId] = useState<number | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -81,6 +84,28 @@ export default function App() {
       );
     } finally {
       setIsUploading(false);
+    }
+  }
+
+  async function handleDocumentDelete(documentId: number) {
+    if (deletingDocumentId !== null) {
+      return;
+    }
+
+    setDeletingDocumentId(documentId);
+    setDeleteError(null);
+
+    try {
+      await deleteDocument(documentId);
+      setDocuments((current) =>
+        current.filter((document) => document.id !== documentId),
+      );
+    } catch (error) {
+      setDeleteError(
+        error instanceof Error ? error.message : "The document could not be deleted.",
+      );
+    } finally {
+      setDeletingDocumentId(null);
     }
   }
 
@@ -193,6 +218,9 @@ export default function App() {
           {uploadError && (
             <p className={styles.documentError}>{uploadError}</p>
           )}
+          {deleteError && (
+            <p className={styles.documentError}>{deleteError}</p>
+          )}
 
           {documentsLoading && (
             <p className={styles.documentMessage}>Loading documents…</p>
@@ -208,9 +236,19 @@ export default function App() {
             <ul className={styles.documentList}>
               {documents.map((document) => (
                 <li className={styles.documentItem} key={document.id}>
-                  <strong title={document.originalName}>
-                    {document.originalName}
-                  </strong>
+                  <div className={styles.documentItemHeader}>
+                    <strong title={document.originalName}>
+                      {document.originalName}
+                    </strong>
+                    <button
+                      type="button"
+                      onClick={() => handleDocumentDelete(document.id)}
+                      disabled={deletingDocumentId !== null}
+                      aria-label={`Delete ${document.originalName}`}
+                    >
+                      {deletingDocumentId === document.id ? "Deleting…" : "Delete"}
+                    </button>
+                  </div>
                   <small className={styles.documentDetails}>
                     {document.fileType.toUpperCase()} · {document.chunkCount} chunks ·{" "}
                     {document.status}
