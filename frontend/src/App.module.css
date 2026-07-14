@@ -121,8 +121,24 @@
 .uploadForm {
   display: grid;
   gap: 9px;
-  padding-bottom: 18px;
-  border-bottom: 1px solid #e1e6ef;
+  padding: 12px;
+  margin-bottom: 18px;
+  background: #ffffff;
+  border: 1px dashed #b8c4d7;
+  border-radius: 9px;
+  transition: background 150ms ease, border-color 150ms ease;
+}
+
+.uploadForm.dragging {
+  background: #edf3ff;
+  border-color: #2563eb;
+}
+
+.dropHint {
+  margin: 0;
+  color: #59677e;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .uploadForm input {

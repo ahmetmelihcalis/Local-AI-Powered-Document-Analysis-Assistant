@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { DragEvent, FormEvent, useEffect, useRef, useState } from "react";
 import {
   ChatSource,
   deleteDocument,
@@ -12,6 +12,8 @@ import {
 import styles from "./App.module.css";
 
 type ConnectionStatus = "checking" | "ready" | "error";
+const SUPPORTED_DOCUMENT_EXTENSIONS = [".txt", ".md", ".pdf", ".docx"];
+
 type ChatMessage = {
   id: string;
   role: "user" | "assistant";
@@ -34,6 +36,7 @@ export default function App() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [deletingDocumentId, setDeletingDocumentId] = useState<number | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -59,6 +62,32 @@ export default function App() {
     ready: "Local AI is ready",
     error: "Backend connection failed",
   }[status];
+
+  function selectDocumentFile(file: File | null) {
+    if (!file) {
+      setSelectedFile(null);
+      return;
+    }
+
+    const extension = `.${file.name.split(".").pop()?.toLowerCase()}`;
+    if (!SUPPORTED_DOCUMENT_EXTENSIONS.includes(extension)) {
+      setSelectedFile(null);
+      setUploadError("Only TXT, Markdown, PDF and DOCX files are supported.");
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+      return;
+    }
+
+    setSelectedFile(file);
+    setUploadError(null);
+  }
+
+  function handleFileDrop(event: DragEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setIsDraggingFile(false);
+    selectDocumentFile(event.dataTransfer.files[0] ?? null);
+  }
 
   async function handleDocumentUpload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -192,14 +221,29 @@ export default function App() {
             <span>{documents.length}/20</span>
           </div>
 
-          <form className={styles.uploadForm} onSubmit={handleDocumentUpload}>
+          <form
+            className={`${styles.uploadForm} ${isDraggingFile ? styles.dragging : ""}`}
+            onSubmit={handleDocumentUpload}
+            onDragEnter={(event) => {
+              event.preventDefault();
+              setIsDraggingFile(true);
+            }}
+            onDragOver={(event) => event.preventDefault()}
+            onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                setIsDraggingFile(false);
+              }
+            }}
+            onDrop={handleFileDrop}
+          >
+            <p className={styles.dropHint}>Drop a document here or choose a file</p>
             <input
               ref={fileInputRef}
               type="file"
               accept=".txt,.md,.pdf,.docx"
               aria-label="Choose a document"
               onChange={(event) =>
-                setSelectedFile(event.target.files?.[0] ?? null)
+                selectDocumentFile(event.target.files?.[0] ?? null)
               }
               disabled={isUploading}
             />
