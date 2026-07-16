@@ -5,7 +5,6 @@ import {
   DocumentResponse,
   getDocuments,
   getHealth,
-  Language,
   sendQuestion,
   uploadDocument,
 } from "./api";
@@ -26,7 +25,6 @@ export default function App() {
   const [status, setStatus] = useState<ConnectionStatus>("checking");
   const [foundryAvailable, setFoundryAvailable] = useState(false);
   const [question, setQuestion] = useState("");
-  const [language, setLanguage] = useState<Language>("tr");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isSending, setIsSending] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
@@ -159,7 +157,7 @@ export default function App() {
     setIsSending(true);
 
     try {
-      const response = await sendQuestion(trimmedQuestion, language);
+      const response = await sendQuestion(trimmedQuestion);
       setMessages((current) => [
         ...current,
         {
@@ -187,17 +185,6 @@ export default function App() {
         </div>
 
         <div className={styles.headerActions}>
-          <label className={styles.languageSelect}>
-            <span>Language</span>
-            <select
-              value={language}
-              onChange={(event) => setLanguage(event.target.value as Language)}
-              aria-label="Answer language"
-            >
-              <option value="tr">Turkish</option>
-              <option value="en">English</option>
-            </select>
-          </label>
           {(status !== "ready" || !foundryAvailable) && (
             <div
               className={styles.status}

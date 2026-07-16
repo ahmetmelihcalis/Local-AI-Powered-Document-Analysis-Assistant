@@ -35,7 +35,6 @@ def create_document(
     file_type: str,
     file_size: int,
     content_hash: str,
-    language: str | None = None,
     status: str = "processing",
     database_path: Path = DATABASE_PATH,
 ) -> dict[str, Any]:
@@ -48,10 +47,9 @@ def create_document(
                 file_type,
                 file_size,
                 content_hash,
-                language,
                 status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 original_name,
@@ -59,7 +57,6 @@ def create_document(
                 file_type,
                 file_size,
                 content_hash,
-                language,
                 status,
             ),
         )

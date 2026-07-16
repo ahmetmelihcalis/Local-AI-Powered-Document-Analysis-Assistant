@@ -7,8 +7,6 @@ export type HealthResponse = {
   embeddingModel: string;
 };
 
-export type Language = "tr" | "en";
-
 export type ChatSource = {
   documentId: number;
   fileName: string;
@@ -32,7 +30,6 @@ export type DocumentResponse = {
   originalName: string;
   fileType: string;
   fileSize: number;
-  language: string | null;
   status: DocumentStatus;
   chunkCount: number;
   errorMessage: string | null;
@@ -49,14 +46,11 @@ export async function getHealth(): Promise<HealthResponse> {
   return response.json();
 }
 
-export async function sendQuestion(
-  question: string,
-  language: Language,
-): Promise<ChatResponse> {
+export async function sendQuestion(question: string): Promise<ChatResponse> {
   const response = await fetch(`${API_URL}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, language }),
+    body: JSON.stringify({ question }),
   });
 
   if (!response.ok) {

@@ -36,7 +36,6 @@ def initialize_database(database_path: Path = DATABASE_PATH) -> None:
                 file_type TEXT NOT NULL,
                 file_size INTEGER NOT NULL CHECK (file_size >= 0),
                 content_hash TEXT NOT NULL UNIQUE,
-                language TEXT,
                 status TEXT NOT NULL,
                 chunk_count INTEGER NOT NULL DEFAULT 0 CHECK (chunk_count >= 0),
                 error_message TEXT,

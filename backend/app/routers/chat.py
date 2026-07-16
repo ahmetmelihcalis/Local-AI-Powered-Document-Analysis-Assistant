@@ -1,6 +1,4 @@
 from time import perf_counter
-from typing import Literal
-
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
@@ -13,7 +11,6 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
-    language: Literal["tr", "en"] = "tr"
 
     @field_validator("question")
     @classmethod
@@ -55,7 +52,6 @@ async def chat(request: ChatRequest) -> ChatResponse:
         result = await run_in_threadpool(
             answer_question,
             request.question,
-            language=request.language,
         )
     except ValueError as error:
         raise HTTPException(

@@ -39,7 +39,6 @@
 }
 
 .headerActions,
-.languageSelect,
 .status {
   display: flex;
   align-items: center;
@@ -47,20 +46,6 @@
 
 .headerActions {
   gap: 20px;
-}
-
-.languageSelect {
-  gap: 8px;
-  color: #d7dfef;
-  font-size: 13px;
-}
-
-.languageSelect select {
-  padding: 7px 28px 7px 10px;
-  color: #ffffff;
-  background: #26334d;
-  border: 1px solid #42506a;
-  border-radius: 7px;
 }
 
 .status {
@@ -475,7 +460,6 @@
     gap: 9px;
   }
 
-  .languageSelect > span,
   .status > span:last-child {
     display: none;
   }

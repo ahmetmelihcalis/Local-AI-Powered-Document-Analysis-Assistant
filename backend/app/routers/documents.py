@@ -21,7 +21,6 @@ class DocumentResponse(BaseModel):
     originalName: str
     fileType: str
     fileSize: int
-    language: str | None
     status: str
     chunkCount: int
     errorMessage: str | None
@@ -34,7 +33,6 @@ def _document_response(document: dict[str, Any]) -> DocumentResponse:
         originalName=document["original_name"],
         fileType=document["file_type"],
         fileSize=document["file_size"],
-        language=document["language"],
         status=document["status"],
         chunkCount=document["chunk_count"],
         errorMessage=document["error_message"],
