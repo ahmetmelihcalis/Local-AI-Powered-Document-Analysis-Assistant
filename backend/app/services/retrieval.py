@@ -21,6 +21,10 @@ class RetrievedChunk:
     content: str
     page_number: int | None
     section: str | None
+    article: str | None
+    paragraph: str | None
+    point: str | None
+    subpoint: str | None
     score: float
 
 
@@ -99,6 +103,10 @@ def retrieve_relevant_chunks(
                 content=chunk["content"],
                 page_number=chunk["page_number"],
                 section=chunk["section"],
+                article=chunk["article"],
+                paragraph=chunk["paragraph"],
+                point=chunk["point"],
+                subpoint=chunk["subpoint"],
                 score=score,
             )
         )

@@ -218,6 +218,10 @@ def ingest_document(
                     embedding=embedding,
                     page_number=chunk.page,
                     section=chunk.section,
+                    article=chunk.article,
+                    paragraph=chunk.paragraph,
+                    point=chunk.point,
+                    subpoint=chunk.subpoint,
                 )
                 for chunk, embedding in zip(chunks, embeddings, strict=True)
             ],

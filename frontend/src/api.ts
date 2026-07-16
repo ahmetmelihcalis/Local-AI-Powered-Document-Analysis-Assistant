@@ -12,6 +12,10 @@ export type ChatSource = {
   fileName: string;
   page: number | null;
   section: string | null;
+  article: string | null;
+  paragraph: string | null;
+  point: string | null;
+  subpoint: string | null;
   excerpt: string;
   score: number;
 };

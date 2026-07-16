@@ -50,6 +50,10 @@ def initialize_database(database_path: Path = DATABASE_PATH) -> None:
                 embedding BLOB,
                 page_number INTEGER,
                 section TEXT,
+                article TEXT,
+                paragraph TEXT,
+                point TEXT,
+                subpoint TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
                 UNIQUE (document_id, chunk_index)
@@ -57,5 +61,19 @@ def initialize_database(database_path: Path = DATABASE_PATH) -> None:
 
             CREATE INDEX IF NOT EXISTS idx_chunks_document_id
             ON chunks(document_id);
+            """
+        )
+
+        existing_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(chunks)")
+        }
+        for column in ("article", "paragraph", "point", "subpoint"):
+            if column not in existing_columns:
+                connection.execute(f"ALTER TABLE chunks ADD COLUMN {column} TEXT")
+
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_chunks_legal_hierarchy
+            ON chunks(document_id, article, paragraph, point, subpoint)
             """
         )

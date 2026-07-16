@@ -16,6 +16,10 @@ class LegalBlock:
     text: str
     page: int
     section: str
+    article: str | None = None
+    paragraph: str | None = None
+    point: str | None = None
+    subpoint: str | None = None
 
 
 def _is_roman_numeral_or_number(value: str) -> bool:
@@ -161,38 +165,96 @@ def _looks_like_article_title(line: str) -> bool:
     )
 
 
+def _paragraph_marker(line: str) -> str | None:
+    if line.startswith("("):
+        marker, separator, _ = line[1:].partition(")")
+        if separator and marker.isdigit():
+            return marker
+
+    marker, separator, _ = line.partition(".")
+    if separator and marker.isdigit():
+        return marker
+    return None
+
+
+def _parenthetical_marker(line: str) -> str | None:
+    if not line.startswith("("):
+        return None
+
+    marker, separator, _ = line[1:].partition(")")
+    if not separator or not marker.isalpha() or len(marker) > 4:
+        return None
+    return marker.casefold()
+
+
+def _is_roman_subpoint(marker: str) -> bool:
+    return len(marker) > 1 and set(marker.upper()) <= ROMAN_NUMERAL_CHARACTERS
+
+
 @dataclass
 class _LegalStructure:
     chapter: str | None = None
     section: str | None = None
     article: str | None = None
+    article_title: str | None = None
+    paragraph: str | None = None
+    point: str | None = None
+    subpoint: str | None = None
     annex: str | None = None
 
     @property
     def name(self) -> str:
-        parts = (self.chapter, self.section, self.article, self.annex)
+        article = self.article
+        if article and self.article_title:
+            article = f"{article} — {self.article_title}"
+        parts = (self.chapter, self.section, article, self.annex)
         return " > ".join(part for part in parts if part) or "Preamble"
 
     def enter_chapter(self, heading: str) -> None:
         self.chapter = heading
         self.section = None
         self.article = None
+        self.article_title = None
+        self._reset_clauses()
         self.annex = None
 
     def enter_section(self, heading: str) -> None:
         self.section = heading
         self.article = None
+        self.article_title = None
+        self._reset_clauses()
         self.annex = None
 
     def enter_article(self, heading: str) -> None:
         self.article = heading
+        self.article_title = None
+        self._reset_clauses()
         self.annex = None
+
+    def enter_paragraph(self, marker: str) -> None:
+        self.paragraph = marker
+        self.point = None
+        self.subpoint = None
+
+    def enter_point(self, marker: str) -> None:
+        self.point = marker
+        self.subpoint = None
+
+    def enter_subpoint(self, marker: str) -> None:
+        self.subpoint = marker
 
     def enter_annex(self, heading: str) -> None:
         self.chapter = None
         self.section = None
         self.article = None
+        self.article_title = None
+        self._reset_clauses()
         self.annex = heading
+
+    def _reset_clauses(self) -> None:
+        self.paragraph = None
+        self.point = None
+        self.subpoint = None
 
 
 @dataclass
@@ -202,7 +264,6 @@ class _LegalBlockParser:
     pending_headings: list[str] = field(default_factory=list)
     current_lines: list[str] = field(default_factory=list)
     current_page: int = 1
-    current_section: str = "Preamble"
     awaiting_article_title: bool = False
 
     def parse(self, pages: list[PageText]) -> list[LegalBlock]:
@@ -217,7 +278,6 @@ class _LegalBlockParser:
     def _start_page(self, page_number: int) -> None:
         self.current_page = page_number
         self.current_lines = []
-        self.current_section = self.structure.name
 
     def _finish_page(self) -> None:
         if self.pending_headings and not self.current_lines:
@@ -232,7 +292,11 @@ class _LegalBlockParser:
                 LegalBlock(
                     text=text,
                     page=self.current_page,
-                    section=self.current_section,
+                    section=self.structure.name,
+                    article=self.structure.article,
+                    paragraph=self.structure.paragraph,
+                    point=self.structure.point,
+                    subpoint=self.structure.subpoint,
                 )
             )
         self.current_lines = []
@@ -268,7 +332,6 @@ class _LegalBlockParser:
         self.current_lines = [*self.pending_headings, heading]
         self.pending_headings.clear()
         self.awaiting_article_title = True
-        self.current_section = self.structure.name
 
     def _enter_annex(self, heading: str) -> None:
         self._flush_block()
@@ -279,11 +342,24 @@ class _LegalBlockParser:
 
     def _heading_changed(self) -> None:
         self.awaiting_article_title = False
-        self.current_section = self.structure.name
 
     def _append_content(self, line: str) -> None:
         if self.awaiting_article_title:
             self._capture_article_title(line)
+
+        paragraph = _paragraph_marker(line)
+        if paragraph is not None:
+            self._flush_block()
+            self.structure.enter_paragraph(paragraph)
+        else:
+            marker = _parenthetical_marker(line)
+            if marker is not None:
+                starts_subpoint = self._starts_subpoint(marker)
+                self._flush_block()
+                if starts_subpoint:
+                    self.structure.enter_subpoint(marker)
+                else:
+                    self.structure.enter_point(marker)
 
         if self.current_lines:
             self.current_lines.append(line)
@@ -294,9 +370,18 @@ class _LegalBlockParser:
 
     def _capture_article_title(self, line: str) -> None:
         if _looks_like_article_title(line):
-            self.structure.article = f"{self.structure.article} — {line}"
-            self.current_section = self.structure.name
+            self.structure.article_title = line
         self.awaiting_article_title = False
+
+    def _starts_subpoint(self, marker: str) -> bool:
+        if _is_roman_subpoint(marker):
+            return True
+        if marker != "i" or self.structure.point is None:
+            return False
+        return self.structure.subpoint is not None or self._current_clause_opens_list()
+
+    def _current_clause_opens_list(self) -> bool:
+        return bool(self.current_lines) and self.current_lines[-1].rstrip().endswith(":")
 
 
 def _create_legal_blocks(pages: list[PageText]) -> list[LegalBlock]:
@@ -315,6 +400,10 @@ def chunk_legal_pdf(
             tokenizer,
             page=block.page,
             section=block.section,
+            article=block.article,
+            paragraph=block.paragraph,
+            point=block.point,
+            subpoint=block.subpoint,
             group_paragraphs=True,
         )
     ]

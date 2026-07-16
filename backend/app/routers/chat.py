@@ -26,6 +26,10 @@ class SourceResponse(BaseModel):
     fileName: str
     page: int | None
     section: str | None
+    article: str | None
+    paragraph: str | None
+    point: str | None
+    subpoint: str | None
     excerpt: str
     score: float
 
@@ -73,6 +77,10 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 fileName=source.file_name,
                 page=source.page_number,
                 section=source.section,
+                article=source.article,
+                paragraph=source.paragraph,
+                point=source.point,
+                subpoint=source.subpoint,
                 excerpt=_create_excerpt(source.content),
                 score=round(source.score, 4),
             )

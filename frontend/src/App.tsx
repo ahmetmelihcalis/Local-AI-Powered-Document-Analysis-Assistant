@@ -21,6 +21,19 @@ type ChatMessage = {
   durationMs?: number;
 };
 
+function legalReference(source: ChatSource): string | null {
+  if (!source.article) {
+    return null;
+  }
+
+  return [
+    source.article,
+    source.paragraph ? `(${source.paragraph})` : "",
+    source.point ? `(${source.point})` : "",
+    source.subpoint ? `(${source.subpoint})` : "",
+  ].join("");
+}
+
 export default function App() {
   const [status, setStatus] = useState<ConnectionStatus>("checking");
   const [foundryAvailable, setFoundryAvailable] = useState(false);
@@ -320,22 +333,32 @@ export default function App() {
                     {message.sources.length === 1 ? "" : "s"}
                   </summary>
                   <div className={styles.sourceList}>
-                    {message.sources.map((source) => (
-                      <article className={styles.sourceCard} key={`${message.id}-${source.documentId}-${source.excerpt}`}>
-                        <div className={styles.sourceHeader}>
-                          <strong>{source.fileName}</strong>
-                          <span>{Math.round(source.score * 100)}% similarity</span>
-                        </div>
-                        {(source.page !== null || source.section) && (
-                          <small>
-                            {source.page !== null ? `Page ${source.page}` : ""}
-                            {source.page !== null && source.section ? " · " : ""}
-                            {source.section ?? ""}
-                          </small>
-                        )}
-                        <p>{source.excerpt}</p>
-                      </article>
-                    ))}
+                    {message.sources.map((source) => {
+                      const clause = legalReference(source);
+                      return (
+                        <article
+                          className={styles.sourceCard}
+                          key={`${message.id}-${source.documentId}-${source.excerpt}`}
+                        >
+                          <div className={styles.sourceHeader}>
+                            <strong>{source.fileName}</strong>
+                            <span>{Math.round(source.score * 100)}% similarity</span>
+                          </div>
+                          {(source.page !== null || source.section || clause) && (
+                            <small>
+                              {clause ?? ""}
+                              {clause && (source.page !== null || source.section)
+                                ? " · "
+                                : ""}
+                              {source.page !== null ? `Page ${source.page}` : ""}
+                              {source.page !== null && source.section ? " · " : ""}
+                              {source.section ?? ""}
+                            </small>
+                          )}
+                          <p>{source.excerpt}</p>
+                        </article>
+                      );
+                    })}
                   </div>
                 </details>
               )}

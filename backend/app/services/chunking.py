@@ -17,6 +17,10 @@ class TextChunk:
     token_count: int
     page: int | None = None
     section: str | None = None
+    article: str | None = None
+    paragraph: str | None = None
+    point: str | None = None
+    subpoint: str | None = None
 
 
 def load_tokenizer(tokenizer_path: Path) -> Tokenizer:
@@ -29,6 +33,10 @@ def chunk_text(
     *,
     page: int | None = None,
     section: str | None = None,
+    article: str | None = None,
+    paragraph: str | None = None,
+    point: str | None = None,
+    subpoint: str | None = None,
     target_tokens: int = TARGET_TOKENS,
     max_tokens: int = MAX_TOKENS,
     overlap_tokens: int = OVERLAP_TOKENS,
@@ -74,6 +82,10 @@ def chunk_text(
                     token_count=len(token_ids),
                     page=page,
                     section=section,
+                    article=article,
+                    paragraph=paragraph,
+                    point=point,
+                    subpoint=subpoint,
                 )
             )
 

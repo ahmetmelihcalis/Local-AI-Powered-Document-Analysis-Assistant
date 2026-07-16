@@ -13,6 +13,10 @@ class ChunkInput:
     embedding: list[float] | np.ndarray
     page_number: int | None = None
     section: str | None = None
+    article: str | None = None
+    paragraph: str | None = None
+    point: str | None = None
+    subpoint: str | None = None
 
 
 def _embedding_to_blob(embedding: list[float] | np.ndarray) -> bytes:
@@ -162,6 +166,10 @@ def add_chunks(
             _embedding_to_blob(chunk.embedding),
             chunk.page_number,
             chunk.section,
+            chunk.article,
+            chunk.paragraph,
+            chunk.point,
+            chunk.subpoint,
         )
         for chunk_index, chunk in enumerate(chunks)
     ]
@@ -175,9 +183,13 @@ def add_chunks(
                 content,
                 embedding,
                 page_number,
-                section
+                section,
+                article,
+                paragraph,
+                point,
+                subpoint
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
