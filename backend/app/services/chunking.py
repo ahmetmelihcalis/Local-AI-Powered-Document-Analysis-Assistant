@@ -8,6 +8,7 @@ from tokenizers import Tokenizer
 TARGET_TOKENS = 250
 MAX_TOKENS = 350
 OVERLAP_TOKENS = 40
+HEADING_MAX_TOKENS = 20
 
 
 @dataclass
@@ -31,53 +32,61 @@ def chunk_text(
     target_tokens: int = TARGET_TOKENS,
     max_tokens: int = MAX_TOKENS,
     overlap_tokens: int = OVERLAP_TOKENS,
+    group_paragraphs: bool = False,
 ) -> list[TextChunk]:
     if not 0 <= overlap_tokens < target_tokens <= max_tokens:
         raise ValueError("Chunk token limits are invalid.")
 
     paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
-    segment_ids: list[list[int]] = []
+    units: list[str] = []
+    pending_headings: list[str] = []
 
-    segment_limit = max_tokens - overlap_tokens
+    if group_paragraphs and paragraphs:
+        units.append("\n\n".join(paragraphs))
 
-    for paragraph in paragraphs:
-        token_ids = tokenizer.encode(paragraph, add_special_tokens=False).ids
-        if len(token_ids) <= segment_limit:
-            segment_ids.append(token_ids)
-            continue
-
-        segment_ids.extend(
-            token_ids[start : start + segment_limit]
-            for start in range(0, len(token_ids), segment_limit)
+    for paragraph in (paragraphs if not group_paragraphs else []):
+        paragraph_token_count = len(
+            tokenizer.encode(paragraph, add_special_tokens=False).ids
+        )
+        looks_like_heading = (
+            paragraph_token_count <= HEADING_MAX_TOKENS
+            and not re.search(r"[.!?]$", paragraph)
         )
 
-    chunks: list[TextChunk] = []
-    current: list[int] = []
+        if looks_like_heading:
+            pending_headings.append(paragraph)
+            continue
 
-    def append_current() -> None:
-        if not current:
-            return
-        content = tokenizer.decode(current, skip_special_tokens=True).strip()
+        units.append("\n\n".join([*pending_headings, paragraph]))
+        pending_headings.clear()
+
+    if pending_headings:
+        units.append("\n\n".join(pending_headings))
+
+    chunks: list[TextChunk] = []
+
+    def append_chunk(token_ids: list[int]) -> None:
+        content = tokenizer.decode(token_ids, skip_special_tokens=True).strip()
         if content:
             chunks.append(
                 TextChunk(
                     content=content,
-                    token_count=len(current),
+                    token_count=len(token_ids),
                     page=page,
                     section=section,
                 )
             )
 
-    for segment in segment_ids:
-        if current and len(current) + len(segment) > max_tokens:
-            append_current()
-            current = current[-overlap_tokens:] if overlap_tokens else []
+    for unit in units:
+        token_ids = tokenizer.encode(unit, add_special_tokens=False).ids
+        if len(token_ids) <= max_tokens:
+            append_chunk(token_ids)
+            continue
 
-        if current and len(current) >= target_tokens:
-            append_current()
-            current = current[-overlap_tokens:] if overlap_tokens else []
+        step = target_tokens - overlap_tokens
+        for start in range(0, len(token_ids), step):
+            append_chunk(token_ids[start : start + target_tokens])
+            if start + target_tokens >= len(token_ids):
+                break
 
-        current.extend(segment)
-
-    append_current()
     return chunks

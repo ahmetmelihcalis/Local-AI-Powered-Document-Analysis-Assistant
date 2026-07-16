@@ -2,8 +2,8 @@ from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 
+import pymupdf
 from docx import Document
-from pypdf import PdfReader
 
 
 TEXT_EXTENSIONS = {".txt", ".md"}
@@ -46,17 +46,22 @@ def read_text_document(filename: str, content: bytes) -> str:
 
 def read_pdf_document(content: bytes) -> list[PageText]:
     try:
-        reader = PdfReader(BytesIO(content))
+        document = pymupdf.open(stream=content, filetype="pdf")
     except Exception as error:
         raise ValueError("The PDF file could not be read.") from error
 
-    if reader.is_encrypted:
+    if document.needs_pass:
+        document.close()
         raise ValueError("Encrypted PDF files are not supported.")
 
-    pages = [
-        PageText(page=number, text=(page.extract_text() or "").strip())
-        for number, page in enumerate(reader.pages, start=1)
-    ]
+    try:
+        pages = [
+            PageText(page=number, text=page.get_text("text", sort=True).strip())
+            for number, page in enumerate(document, start=1)
+        ]
+    finally:
+        document.close()
+
     pages = [page for page in pages if page.text]
 
     if not pages:

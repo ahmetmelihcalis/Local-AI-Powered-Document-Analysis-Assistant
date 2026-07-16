@@ -26,6 +26,7 @@ from app.services.foundry_service import (
     create_embeddings,
     get_embedding_tokenizer_path,
 )
+from app.services.legal_parser import chunk_legal_pdf, is_legal_document
 
 
 MAX_FILE_SIZE = 10 * 1024 * 1024
@@ -88,6 +89,13 @@ def _group_docx_blocks(blocks: list[DocumentText]) -> list[DocumentText]:
     return groups
 
 
+def _create_docx_outline(blocks: list[DocumentText]) -> str | None:
+    sections = list(
+        dict.fromkeys(block.section for block in blocks if block.section)
+    )
+    return "\n\n".join(sections) if len(sections) > 1 else None
+
+
 def _create_chunks(filename: str, content: bytes, tokenizer) -> list[TextChunk]:
     extension = Path(filename).suffix.lower()
 
@@ -95,18 +103,45 @@ def _create_chunks(filename: str, content: bytes, tokenizer) -> list[TextChunk]:
         return chunk_text(read_text_document(filename, content), tokenizer)
 
     if extension == ".pdf":
+        pages = read_pdf_document(content)
+        if is_legal_document(pages):
+            return chunk_legal_pdf(pages, tokenizer)
+
         return [
             chunk
-            for page in read_pdf_document(content)
-            for chunk in chunk_text(page.text, tokenizer, page=page.page)
+            for page in pages
+            for chunk in chunk_text(
+                page.text,
+                tokenizer,
+                page=page.page,
+                group_paragraphs=True,
+            )
         ]
 
     if extension == ".docx":
-        return [
+        blocks = read_docx_document(content)
+        outline = _create_docx_outline(blocks)
+        outline_chunks = (
+            chunk_text(
+                outline,
+                tokenizer,
+                section="Document outline",
+                group_paragraphs=True,
+            )
+            if outline
+            else []
+        )
+        content_chunks = [
             chunk
-            for block in _group_docx_blocks(read_docx_document(content))
-            for chunk in chunk_text(block.text, tokenizer, section=block.section)
+            for block in _group_docx_blocks(blocks)
+            for chunk in chunk_text(
+                block.text,
+                tokenizer,
+                section=block.section,
+                group_paragraphs=True,
+            )
         ]
+        return [*outline_chunks, *content_chunks]
 
     raise DocumentIngestionError("The document type is not supported.")
 
