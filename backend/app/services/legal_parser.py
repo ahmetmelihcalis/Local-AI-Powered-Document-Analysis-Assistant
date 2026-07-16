@@ -182,9 +182,14 @@ def _parenthetical_marker(line: str) -> str | None:
         return None
 
     marker, separator, _ = line[1:].partition(")")
-    if not separator or not marker.isalpha() or len(marker) > 4:
+    if (
+        not separator
+        or not marker.isalpha()
+        or not marker.islower()
+        or len(marker) > 4
+    ):
         return None
-    return marker.casefold()
+    return marker
 
 
 def _is_roman_subpoint(marker: str) -> bool:
