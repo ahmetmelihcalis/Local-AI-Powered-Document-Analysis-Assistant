@@ -13,6 +13,7 @@ from app.services.foundry_service import (
     EMBEDDING_MODEL,
     foundry_status,
     test_chat,
+    unload_models,
 )
 
 
@@ -23,7 +24,10 @@ class TestChatRequest(BaseModel):
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     initialize_database()
-    yield
+    try:
+        yield
+    finally:
+        unload_models()
 
 
 app = FastAPI(title="Local RAG Assistant API", lifespan=lifespan)
