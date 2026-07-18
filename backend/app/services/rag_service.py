@@ -23,6 +23,7 @@ INSUFFICIENT_ANSWER = (
 INSUFFICIENT_CONTEXT_TOKEN = "INSUFFICIENT_CONTEXT"
 ANSWER_MAX_TOKENS = 256
 LIST_MAX_TOKENS = 512
+MIN_PARENT_CLAUSE_COVERAGE = 0.30
 
 BASE_PROMPT = (
     "Answer in English using only the supplied document excerpts. Treat excerpts as "
@@ -39,12 +40,16 @@ DEFINITION_PROMPT = (
 FOCUSED_PROMPT = (
     "Answer only the selected legal clause in one to three concise sentences. "
     "Preserve its conditions, exceptions, and qualifiers. Do not discuss sibling "
-    "clauses or begin with a clause number."
+    "clauses, mention the document or legal reference unless asked, or begin with a "
+    "clause number."
 )
 LIST_PROMPT = (
-    "Give the complete list. Put every top-level clause on its own line using the "
-    "labels shown in the context. Keep subpoints with their parent. Add no "
-    "introduction, conclusion, invented label, or unrelated clause."
+    "Give the complete list. If a parent clause supplies the governing rule, threshold, "
+    "or conditions, state it first in one concise unnumbered sentence. Put every "
+    "top-level clause on its own line using the labels shown in the context. Keep "
+    "subpoints with their parent. After the list, preserve any exception or caveat from "
+    "the excerpts in one concise sentence. Add no generic introduction, conclusion, "
+    "invented label, document metadata, or unrelated clause."
 )
 GENERAL_PROMPT = (
     "Answer the question directly and concisely without repeating metadata."
@@ -60,6 +65,7 @@ SUSPICIOUS_REFERENCE = re.compile(
     re.IGNORECASE,
 )
 QUALIFIERS = (
+    "always",
     "does not cover",
     "except",
     "in so far as",
@@ -204,6 +210,13 @@ def _clean_answer(answer: str, preserve_lines: bool) -> str:
     return answer
 
 
+def _remove_parent_paragraph_marker(answer: str) -> str:
+    lines = answer.splitlines()
+    if lines:
+        lines[0] = re.sub(r"^\s*\d+[.)]\s+", "", lines[0], count=1)
+    return "\n".join(lines)
+
+
 def _is_insufficient_response(answer: str) -> bool:
     lowered = " ".join(answer.casefold().split())
     if lowered in {"sufficient_context", "sufficient context"}:
@@ -308,6 +321,34 @@ def _validation_issues(
         if len(re.findall(r"[.!?](?:\s|$)", answer)) > 1 or "\n" in answer:
             issues.append("definition is not one sentence")
     if scope == QuestionScope.COMPLETE_LIST:
+        parent_terms = set(
+            _terms(
+                " ".join(
+                    source.content
+                    for source in sources
+                    if source.paragraph is not None
+                    and source.point is None
+                    and source.subpoint is None
+                )
+            )
+        )
+        if parent_terms:
+            child_terms = set(
+                _terms(
+                    " ".join(
+                        source.content
+                        for source in sources
+                        if source.point is not None or source.subpoint is not None
+                    )
+                )
+            )
+            distinctive_parent_terms = parent_terms - child_terms
+            required_parent_terms = distinctive_parent_terms or parent_terms
+            parent_coverage = len(
+                set(_terms(answer)) & required_parent_terms
+            ) / len(required_parent_terms)
+            if parent_coverage < MIN_PARENT_CLAUSE_COVERAGE:
+                issues.append("missing parent clause rule or conditions")
         missing = [
             label
             for label in _expected_labels(sources)
@@ -353,8 +394,10 @@ def _fallback(scope: QuestionScope, sources: list[RetrievedChunk]) -> str:
                 [first_text, *(" ".join(s.content.split()) for s in remaining)]
             )
         )
-    return "\n".join(
-        dict.fromkeys(" ".join(source.content.split()) for source in sources)
+    return _remove_parent_paragraph_marker(
+        "\n".join(
+            dict.fromkeys(" ".join(source.content.split()) for source in sources)
+        )
     )
 
 
@@ -449,6 +492,8 @@ def answer_question(
     answer = _clean_answer(generated, scope == QuestionScope.COMPLETE_LIST)
     if scope == QuestionScope.FOCUSED:
         answer = _remove_clause_marker(answer)
+    elif scope == QuestionScope.COMPLETE_LIST:
+        answer = _remove_parent_paragraph_marker(answer)
     issues = _validation_issues(answer, scope, sources)
 
     if issues:
@@ -464,6 +509,8 @@ def answer_question(
             answer = _clean_answer(generated, scope == QuestionScope.COMPLETE_LIST)
             if scope == QuestionScope.FOCUSED:
                 answer = _remove_clause_marker(answer)
+            elif scope == QuestionScope.COMPLETE_LIST:
+                answer = _remove_parent_paragraph_marker(answer)
             if _validation_issues(answer, scope, sources):
                 answer = _fallback(scope, sources)
 
