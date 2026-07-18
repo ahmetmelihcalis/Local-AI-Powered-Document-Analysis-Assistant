@@ -18,6 +18,9 @@ MIN_SIMILARITY = 0.30
 MAX_SCORE_DROP = 0.10
 KEYWORD_WEIGHT = 0.12
 DEFINITION_MATCH_BONUS = 0.15
+MIN_RELEVANCE_COSINE = 0.55
+HIGH_RELEVANCE_COSINE = 0.72
+MIN_QUERY_COVERAGE = 0.30
 BM25_K1 = 1.5
 BM25_B = 0.75
 HIGH_CONFIDENCE_SCORE = 0.50
@@ -131,6 +134,25 @@ def _keyword_tokens(text: str) -> list[str]:
 
 def _query_tokens(question: str) -> list[str]:
     return list(dict.fromkeys(_keyword_tokens(question)))
+
+
+def _passes_relevance_gate(
+    question: str,
+    document: str,
+    cosine_score: float,
+    definition_score: float,
+) -> bool:
+    if definition_score > 0 or cosine_score >= HIGH_RELEVANCE_COSINE:
+        return True
+    if cosine_score < MIN_RELEVANCE_COSINE:
+        return False
+
+    query_tokens = set(_query_tokens(question))
+    if not query_tokens:
+        return False
+    document_tokens = set(_keyword_tokens(document))
+    coverage = len(query_tokens & document_tokens) / len(query_tokens)
+    return coverage >= MIN_QUERY_COVERAGE
 
 
 def _definition_subject(question: str) -> str | None:
@@ -400,6 +422,22 @@ def retrieve_relevant_chunks(
         return []
 
     original_top_index = int(ranked_indices[0])
+    top_document = "\n".join(
+        part
+        for part in (
+            chunks[original_top_index]["section"],
+            chunks[original_top_index]["content"],
+        )
+        if part
+    )
+    if not _passes_relevance_gate(
+        question,
+        top_document,
+        float(similarities[original_top_index]),
+        float(definition_scores[original_top_index]),
+    ):
+        return []
+
     scope = classify_question_scope(question, chunks[original_top_index]["point"])
     if scope == QuestionScope.DEFINITION:
         selected_indices = _definition_indices(definition_scores, base_ranking_scores)
