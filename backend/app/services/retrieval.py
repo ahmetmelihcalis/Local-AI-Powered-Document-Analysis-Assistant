@@ -17,9 +17,10 @@ DEFAULT_TOP_K = 4
 MIN_SIMILARITY = 0.30
 MAX_SCORE_DROP = 0.10
 KEYWORD_WEIGHT = 0.12
+QUERY_EXPANSION_WEIGHT = 0.08
 DEFINITION_MATCH_BONUS = 0.15
 MIN_RELEVANCE_COSINE = 0.55
-HIGH_RELEVANCE_COSINE = 0.72
+HIGH_RELEVANCE_COSINE = 0.68
 MIN_QUERY_COVERAGE = 0.30
 BM25_K1 = 1.5
 BM25_B = 0.75
@@ -30,6 +31,15 @@ ADJACENT_CHUNK_BONUS = 0.10
 MAX_COMPLETE_SCOPE_CHUNKS = 20
 PARAGRAPH_QUERY_COVERAGE_WEIGHT = 0.12
 PARAGRAPH_CONTRAST_BONUS = 0.12
+PSEUDO_RELEVANCE_CHUNKS = 4
+MAX_EXPANSION_TERMS = 8
+MIN_EXPANSION_DOCUMENTS = 2
+SEMANTIC_OVERRIDE_MARGIN = 0.06
+
+ARTICLE_CITATION = re.compile(
+    r"\bArticle\s+(\d+[a-z]?)(?:\s*\(([0-9]+)\))?",
+    re.IGNORECASE,
+)
 
 CONTRAST_TERMS = {
     "except",
@@ -98,6 +108,8 @@ def classify_question_scope(
     )
     if normalized.startswith(complete_scope_terms):
         return QuestionScope.COMPLETE_LIST
+    if re.match(r"^(?:what|which) (?:must|should) .+\bdo\b", normalized):
+        return QuestionScope.COMPLETE_LIST
     if top_point is not None:
         return QuestionScope.FOCUSED
     if is_list_question(question):
@@ -145,6 +157,104 @@ def _keyword_tokens(text: str) -> list[str]:
 
 def _query_tokens(question: str) -> list[str]:
     return list(dict.fromkeys(_keyword_tokens(question)))
+
+
+def _automatic_expansion_terms(
+    question: str,
+    documents: list[str],
+    similarities: np.ndarray,
+    group_keys: list[tuple[int, str | None]],
+) -> tuple[str, ...]:
+    if len(documents) < MIN_EXPANSION_DOCUMENTS:
+        return ()
+
+    query_tokens = set(_query_tokens(question))
+    seed_count = min(PSEUDO_RELEVANCE_CHUNKS, len(documents))
+    seed_indices = np.argsort(similarities)[::-1][:seed_count]
+    anchor_group = group_keys[int(seed_indices[0])]
+    coherent_indices = [
+        int(index) for index in seed_indices if group_keys[int(index)] == anchor_group
+    ]
+    if len(coherent_indices) < MIN_EXPANSION_DOCUMENTS:
+        return ()
+
+    seed_tokens = [set(_keyword_tokens(documents[index])) for index in coherent_indices]
+    seed_frequency = Counter(token for tokens in seed_tokens for token in tokens)
+    document_tokens = [set(_keyword_tokens(document)) for document in documents]
+    candidates: list[tuple[float, str]] = []
+
+    for token, frequency in seed_frequency.items():
+        if token in query_tokens or frequency < MIN_EXPANSION_DOCUMENTS:
+            continue
+
+        document_frequency = sum(token in tokens for tokens in document_tokens)
+        inverse_document_frequency = math.log(
+            1 + len(documents) / max(document_frequency, 1)
+        )
+        candidates.append((frequency * inverse_document_frequency, token))
+
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    return tuple(token for _, token in candidates[:MAX_EXPANSION_TERMS])
+
+
+def _referenced_clause_target_index(
+    question: str,
+    chunks: list[dict],
+    anchor_index: int,
+    ranking_scores: np.ndarray,
+) -> int | None:
+    anchor = chunks[anchor_index]
+    query_tokens = set(_query_tokens(question))
+    reference_chunks = [anchor]
+    if anchor["article"] is not None and anchor["paragraph"] is None:
+        reference_chunks = [
+            chunk
+            for chunk in chunks
+            if chunk["document_id"] == anchor["document_id"]
+            and chunk["article"] == anchor["article"]
+        ]
+
+    references: dict[tuple[str, str], tuple[float, int]] = {}
+    for chunk in reference_chunks:
+        chunk_tokens = set(_keyword_tokens(chunk["content"]))
+        coverage = (
+            len(query_tokens & chunk_tokens) / len(query_tokens)
+            if query_tokens
+            else 0.0
+        )
+        for article_number, paragraph in ARTICLE_CITATION.findall(chunk["content"]):
+            if str(anchor["article"]).casefold() == f"article {article_number}".casefold():
+                continue
+            previous_coverage, frequency = references.get(
+                (article_number, paragraph),
+                (0.0, 0),
+            )
+            references[(article_number, paragraph)] = (
+                max(previous_coverage, coverage),
+                frequency + 1,
+            )
+
+    ranked_references = sorted(
+        references.items(),
+        key=lambda item: (item[1][0], item[1][1]),
+        reverse=True,
+    )
+    for (article_number, paragraph), (coverage, frequency) in ranked_references:
+        if coverage < MIN_QUERY_COVERAGE or frequency < 2 or not paragraph:
+            continue
+
+        candidates = [
+            index
+            for index, chunk in enumerate(chunks)
+            if chunk["document_id"] == anchor["document_id"]
+            and str(chunk["article"]).casefold() == f"article {article_number}".casefold()
+            and (not paragraph or chunk["paragraph"] == paragraph)
+            and chunk["point"] is None
+            and chunk["subpoint"] is None
+        ]
+        if candidates:
+            return max(candidates, key=lambda index: float(ranking_scores[index]))
+    return None
 
 
 def _passes_relevance_gate(
@@ -492,16 +602,32 @@ def retrieve_relevant_chunks(
         response[0],
         [chunk["embedding"] for chunk in chunks],
     )
+    searchable_documents = [
+        "\n".join(part for part in (chunk["section"], chunk["content"]) if part)
+        for chunk in chunks
+    ]
     keyword_scores = bm25_scores(
         question,
-        [
-            "\n".join(part for part in (chunk["section"], chunk["content"]) if part)
-            for chunk in chunks
-        ],
+        searchable_documents,
     )
     maximum_keyword_score = float(keyword_scores.max())
     if maximum_keyword_score > 0:
         keyword_scores /= maximum_keyword_score
+
+    expansion_terms = _automatic_expansion_terms(
+        question,
+        searchable_documents,
+        similarities,
+        [
+            (chunk["document_id"], chunk["article"] or chunk["section"])
+            for chunk in chunks
+        ],
+    )
+    expanded_question = " ".join((question, *expansion_terms))
+    expansion_scores = bm25_scores(expanded_question, searchable_documents)
+    maximum_expansion_score = float(expansion_scores.max())
+    if maximum_expansion_score > 0:
+        expansion_scores /= maximum_expansion_score
 
     definition_scores = _definition_scores(
         question,
@@ -510,6 +636,7 @@ def retrieve_relevant_chunks(
     base_ranking_scores = (
         similarities
         + KEYWORD_WEIGHT * keyword_scores
+        + QUERY_EXPANSION_WEIGHT * expansion_scores
         + DEFINITION_MATCH_BONUS * definition_scores
     )
     ranked_indices = np.argsort(base_ranking_scores)[::-1]
@@ -518,6 +645,22 @@ def retrieve_relevant_chunks(
         return []
 
     original_top_index = int(ranked_indices[0])
+    semantic_top_index = int(np.argmax(similarities))
+    if (
+        float(similarities[semantic_top_index])
+        - float(similarities[original_top_index])
+        >= SEMANTIC_OVERRIDE_MARGIN
+    ):
+        original_top_index = semantic_top_index
+
+    reference_target_index = _referenced_clause_target_index(
+        expanded_question,
+        chunks,
+        original_top_index,
+        base_ranking_scores,
+    )
+    if reference_target_index is not None:
+        original_top_index = reference_target_index
     top_document = "\n".join(
         part
         for part in (
@@ -527,12 +670,18 @@ def retrieve_relevant_chunks(
         if part
     )
     if not _passes_relevance_gate(
-        question,
+        expanded_question,
         top_document,
         float(similarities[original_top_index]),
         float(definition_scores[original_top_index]),
     ):
         return []
+
+    if reference_target_index is not None:
+        return [
+            _retrieved_chunk(chunks[index], float(similarities[index]))
+            for index in _focused_clause_indices(chunks, original_top_index)
+        ]
 
     scope = classify_question_scope(question, chunks[original_top_index]["point"])
     if scope == QuestionScope.DEFINITION:
@@ -549,7 +698,7 @@ def retrieve_relevant_chunks(
 
     if scope == QuestionScope.COMPLETE_LIST:
         heading_index = _article_heading_index(
-            question,
+            expanded_question,
             chunks,
             base_ranking_scores,
         )
@@ -570,7 +719,7 @@ def retrieve_relevant_chunks(
     if chunks[original_top_index]["article"] is not None:
         if chunks[original_top_index]["point"] is None:
             paragraph_anchor_index = _paragraph_anchor_index(
-                question,
+                expanded_question,
                 chunks,
                 original_top_index,
                 base_ranking_scores,
