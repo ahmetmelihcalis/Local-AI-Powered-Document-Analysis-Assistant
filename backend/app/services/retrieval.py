@@ -297,7 +297,7 @@ def _focused_clause_indices(
     if anchor["article"] is None:
         return [anchor_index]
 
-    return [
+    selected_indices = [
         index
         for index, chunk in enumerate(chunks)
         if (
@@ -309,6 +309,31 @@ def _focused_clause_indices(
         )
         == hierarchy
     ]
+
+    if anchor["subpoint"] is not None:
+        return selected_indices
+
+    if anchor["point"] is not None:
+        descendants = [
+            index
+            for index, chunk in enumerate(chunks)
+            if chunk["document_id"] == anchor["document_id"]
+            and chunk["article"] == anchor["article"]
+            and chunk["paragraph"] == anchor["paragraph"]
+            and chunk["point"] == anchor["point"]
+            and chunk["subpoint"] is not None
+        ]
+    else:
+        descendants = [
+            index
+            for index, chunk in enumerate(chunks)
+            if chunk["document_id"] == anchor["document_id"]
+            and chunk["article"] == anchor["article"]
+            and chunk["paragraph"] == anchor["paragraph"]
+            and chunk["point"] is not None
+        ]
+
+    return list(dict.fromkeys([*selected_indices, *descendants]))
 
 
 def _complete_scope_indices(
@@ -441,6 +466,11 @@ def retrieve_relevant_chunks(
     scope = classify_question_scope(question, chunks[original_top_index]["point"])
     if scope == QuestionScope.DEFINITION:
         selected_indices = _definition_indices(definition_scores, base_ranking_scores)
+        if not np.any(definition_scores > 0):
+            selected_indices = _focused_clause_indices(
+                chunks,
+                selected_indices[0],
+            )
         return [
             _retrieved_chunk(chunks[index], float(similarities[index]))
             for index in selected_indices

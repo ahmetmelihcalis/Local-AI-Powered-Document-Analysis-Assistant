@@ -149,6 +149,8 @@ def _is_legal(sources: list[RetrievedChunk]) -> bool:
 
 def _question_scope(question: str, sources: list[RetrievedChunk]) -> QuestionScope:
     scope = classify_question_scope(question, sources[0].point)
+    if scope == QuestionScope.DEFINITION and len(sources) > 1 and _is_legal(sources):
+        return QuestionScope.FOCUSED
     if scope == QuestionScope.FOCUSED and _is_legal(sources):
         references = {_legal_reference(source) for source in sources}
         if len(references - {None}) >= 3:
@@ -234,9 +236,6 @@ def _terms(text: str) -> list[str]:
 
 def _has_repetition(answer: str) -> bool:
     words = _terms(answer)
-    for index, word in enumerate(words):
-        if word in words[max(0, index - 2) : index]:
-            return True
     ngrams = [tuple(words[index : index + 5]) for index in range(len(words) - 4)]
     return len(ngrams) != len(set(ngrams))
 
@@ -336,6 +335,13 @@ def _fallback(scope: QuestionScope, sources: list[RetrievedChunk]) -> str:
         definition = _remove_clause_marker(sources[0].content).rstrip(" ;")
         return definition if definition.endswith((".", "!", "?")) else definition + "."
     if scope == QuestionScope.FOCUSED:
+        references = {
+            reference
+            for source in sources
+            if (reference := _legal_reference(source)) is not None
+        }
+        if len(references) > 1:
+            return INSUFFICIENT_ANSWER
         first, *remaining = sources
         first_text = _remove_clause_marker(first.content)
         if not remaining:
@@ -350,6 +356,16 @@ def _fallback(scope: QuestionScope, sources: list[RetrievedChunk]) -> str:
     return "\n".join(
         dict.fromkeys(" ".join(source.content.split()) for source in sources)
     )
+
+
+def _fallback_result(
+    scope: QuestionScope,
+    sources: list[RetrievedChunk],
+) -> RagAnswer:
+    answer = _fallback(scope, sources)
+    if answer == INSUFFICIENT_ANSWER:
+        return RagAnswer(answer, [], 0)
+    return RagAnswer(answer, sources, len(sources))
 
 
 def _messages(
@@ -422,11 +438,11 @@ def answer_question(
         )
     )
     if extractive:
-        return RagAnswer(_fallback(scope, sources), sources, len(sources))
+        return _fallback_result(scope, sources)
 
     generated = _call_chat(chat_function, _messages(question, sources, scope))
     if generated is None:
-        return RagAnswer(_fallback(scope, sources), sources, len(sources))
+        return _fallback_result(scope, sources)
     if _is_insufficient_response(generated):
         return RagAnswer(INSUFFICIENT_ANSWER, [], 0)
 
@@ -435,8 +451,6 @@ def answer_question(
         answer = _remove_clause_marker(answer)
     issues = _validation_issues(answer, scope, sources)
 
-    if issues and scope == QuestionScope.FOCUSED and _is_legal(sources):
-        return RagAnswer(_fallback(scope, sources), sources, len(sources))
     if issues:
         generated = _call_chat(
             chat_function,
@@ -453,4 +467,6 @@ def answer_question(
             if _validation_issues(answer, scope, sources):
                 answer = _fallback(scope, sources)
 
+    if answer == INSUFFICIENT_ANSWER:
+        return RagAnswer(answer, [], 0)
     return RagAnswer(answer, sources, len(sources))
