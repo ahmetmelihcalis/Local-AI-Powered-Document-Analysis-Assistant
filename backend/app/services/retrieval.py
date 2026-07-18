@@ -28,6 +28,17 @@ MEDIUM_CONFIDENCE_SCORE = 0.35
 MIN_RESULT_COUNT = 2
 ADJACENT_CHUNK_BONUS = 0.10
 MAX_COMPLETE_SCOPE_CHUNKS = 20
+PARAGRAPH_QUERY_COVERAGE_WEIGHT = 0.12
+PARAGRAPH_CONTRAST_BONUS = 0.12
+
+CONTRAST_TERMS = {
+    "except",
+    "exception",
+    "exempt",
+    "not",
+    "unless",
+    "without",
+}
 
 KEYWORD_STOP_WORDS = {
     "a",
@@ -336,6 +347,66 @@ def _focused_clause_indices(
     return list(dict.fromkeys([*selected_indices, *descendants]))
 
 
+def _paragraph_anchor_index(
+    question: str,
+    chunks: list[dict],
+    article_anchor_index: int,
+    ranking_scores: np.ndarray,
+) -> int | None:
+    article_anchor = chunks[article_anchor_index]
+    query_tokens = set(_query_tokens(question))
+    query_contrast = query_tokens & CONTRAST_TERMS
+    paragraph_groups: dict[str, list[int]] = {}
+
+    for index, chunk in enumerate(chunks):
+        if (
+            chunk["document_id"] == article_anchor["document_id"]
+            and chunk["article"] == article_anchor["article"]
+            and chunk["paragraph"] is not None
+        ):
+            paragraph_groups.setdefault(chunk["paragraph"], []).append(index)
+
+    candidates: list[tuple[float, int]] = []
+    for indices in paragraph_groups.values():
+        parent_indices = [
+            index
+            for index in indices
+            if chunks[index]["point"] is None and chunks[index]["subpoint"] is None
+        ]
+        if not parent_indices:
+            continue
+
+        paragraph_tokens = set(
+            _keyword_tokens(
+                "\n".join(chunks[index]["content"] for index in indices)
+            )
+        )
+        coverage = (
+            len(query_tokens & paragraph_tokens) / len(query_tokens)
+            if query_tokens
+            else 0.0
+        )
+        contrast_bonus = (
+            PARAGRAPH_CONTRAST_BONUS
+            if query_contrast and query_contrast <= paragraph_tokens
+            else 0.0
+        )
+        group_score = (
+            max(float(ranking_scores[index]) for index in indices)
+            + PARAGRAPH_QUERY_COVERAGE_WEIGHT * coverage
+            + contrast_bonus
+        )
+        parent_index = max(
+            parent_indices,
+            key=lambda index: float(ranking_scores[index]),
+        )
+        candidates.append((group_score, parent_index))
+
+    if not candidates:
+        return None
+    return max(candidates)[1]
+
+
 def _complete_scope_indices(
     chunks: list[dict],
     anchor_index: int,
@@ -497,12 +568,24 @@ def retrieve_relevant_chunks(
             ]
 
     if chunks[original_top_index]["article"] is not None:
-        if chunks[original_top_index]["paragraph"] is None:
-            selected_indices = _complete_scope_indices(
+        if chunks[original_top_index]["point"] is None:
+            paragraph_anchor_index = _paragraph_anchor_index(
+                question,
                 chunks,
                 original_top_index,
-                original_top_index,
+                base_ranking_scores,
             )
+            if paragraph_anchor_index is None:
+                selected_indices = _complete_scope_indices(
+                    chunks,
+                    original_top_index,
+                    original_top_index,
+                )
+            else:
+                selected_indices = _focused_clause_indices(
+                    chunks,
+                    paragraph_anchor_index,
+                )
         else:
             selected_indices = _focused_clause_indices(chunks, original_top_index)
         return [
