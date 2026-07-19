@@ -18,6 +18,8 @@ MIN_SIMILARITY = 0.30
 MAX_SCORE_DROP = 0.10
 KEYWORD_WEIGHT = 0.12
 QUERY_EXPANSION_WEIGHT = 0.08
+COMPARISON_KEYWORD_WEIGHT = 0.25
+PHRASE_MATCH_WEIGHT = 0.20
 DEFINITION_MATCH_BONUS = 0.15
 MIN_RELEVANCE_COSINE = 0.55
 HIGH_RELEVANCE_COSINE = 0.68
@@ -35,9 +37,30 @@ PSEUDO_RELEVANCE_CHUNKS = 4
 MAX_EXPANSION_TERMS = 8
 MIN_EXPANSION_DOCUMENTS = 2
 SEMANTIC_OVERRIDE_MARGIN = 0.06
+LEXICAL_ANCHOR_MIN_SCORE = 0.75
+LEXICAL_ANCHOR_MIN_COVERAGE = 0.60
+MAX_COMPARISON_DOCUMENTS = 3
+MAX_COMPARISON_CHUNKS_PER_DOCUMENT = 2
+DOCUMENT_NAME_MATCH_BONUS = 0.18
+NORMATIVE_CLAUSE_BONUS = 0.05
+OPERATIVE_CLAUSE_BONUS = 0.15
+PREAMBLE_PENALTY = 0.12
+MIN_SUPPLEMENTAL_QUERY_COVERAGE = 0.60
+
+COMPARISON_PATTERNS = (
+    re.compile(r"\bcompar(?:e|ed|ing|ison)\b", re.IGNORECASE),
+    re.compile(r"\bdiffer(?:s|ed|ent|ently|ence|ences)?\b", re.IGNORECASE),
+    re.compile(r"\b(?:versus|vs\.?)\b", re.IGNORECASE),
+)
 
 ARTICLE_CITATION = re.compile(
     r"\bArticle\s+(\d+[a-z]?)(?:\s*\(([0-9]+)\))?",
+    re.IGNORECASE,
+)
+
+EXTERNAL_REGULATION_CITATION = re.compile(
+    r"\bArticle\s+(\d+[a-z]?)\s+of\s+Regulation\s+"
+    r"\(EU\)\s+(\d{4})\s*/\s*0*(\d+)",
     re.IGNORECASE,
 )
 
@@ -61,6 +84,7 @@ KEYWORD_STOP_WORDS = {
     "in",
     "is",
     "of",
+    "on",
     "or",
     "the",
     "to",
@@ -69,11 +93,46 @@ KEYWORD_STOP_WORDS = {
     "which",
 }
 
+DOCUMENT_NAME_STOP_WORDS = {
+    "doc",
+    "docx",
+    "en",
+    "eu",
+    "md",
+    "pdf",
+    "txt",
+}
+
+NORMATIVE_TERMS = {
+    "apply",
+    "must",
+    "obligation",
+    "prohibition",
+    "prohibited",
+    "required",
+    "shall",
+}
+
+COMPARISON_META_TERMS = {
+    "address",
+    "addresses",
+    "compare",
+    "comparison",
+    "differ",
+    "difference",
+    "differently",
+    "regulate",
+    "regulates",
+    "rules",
+}
+
 
 class QuestionScope(StrEnum):
     DEFINITION = "definition"
     FOCUSED = "focused"
     COMPLETE_LIST = "complete_list"
+    CROSS_DOCUMENT = "cross_document"
+
 
 @dataclass
 class RetrievedChunk:
@@ -157,6 +216,13 @@ def _keyword_tokens(text: str) -> list[str]:
 
 def _query_tokens(question: str) -> list[str]:
     return list(dict.fromkeys(_keyword_tokens(question)))
+
+
+def _query_coverage(question: str, document: str) -> float:
+    query_tokens = set(_query_tokens(question))
+    if not query_tokens:
+        return 0.0
+    return len(query_tokens & set(_keyword_tokens(document))) / len(query_tokens)
 
 
 def _automatic_expansion_terms(
@@ -318,6 +384,10 @@ def is_list_question(question: str) -> bool:
     )
 
 
+def is_comparison_question(question: str) -> bool:
+    return any(pattern.search(question) for pattern in COMPARISON_PATTERNS)
+
+
 def bm25_scores(question: str, documents: list[str]) -> np.ndarray:
     query_tokens = _query_tokens(question)
     if not query_tokens or not documents:
@@ -353,6 +423,25 @@ def bm25_scores(question: str, documents: list[str]) -> np.ndarray:
             )
 
     return scores
+
+
+def phrase_match_scores(question: str, documents: list[str]) -> np.ndarray:
+    query_tokens = _query_tokens(question)
+    phrases = {
+        " ".join(query_tokens[start : start + length])
+        for length in range(2, min(4, len(query_tokens)) + 1)
+        for start in range(len(query_tokens) - length + 1)
+        if not set(query_tokens[start : start + length]) <= COMPARISON_META_TERMS
+    }
+    scores = np.zeros(len(documents), dtype=np.float32)
+    for index, document in enumerate(documents):
+        normalized_document = " ".join(_keyword_tokens(document))
+        scores[index] = max(
+            (len(phrase.split()) for phrase in phrases if phrase in normalized_document),
+            default=0,
+        )
+    maximum = float(scores.max())
+    return scores / maximum if maximum > 0 else scores
 
 
 def _article_heading_index(
@@ -528,11 +617,19 @@ def _complete_scope_indices(
     paragraph = None
 
     original_top = chunks[original_top_index]
+    paragraph_has_points = any(
+        chunk["document_id"] == document_id
+        and chunk["article"] == article
+        and chunk["paragraph"] == original_top["paragraph"]
+        and chunk["point"] is not None
+        for chunk in chunks
+    )
     if (
         original_top["document_id"] == document_id
         and original_top["article"] == article
         and original_top["paragraph"] is not None
         and original_top["point"] is None
+        and paragraph_has_points
     ):
         paragraph = original_top["paragraph"]
 
@@ -549,6 +646,83 @@ def _complete_scope_indices(
         if chunks[index]["paragraph"] is not None or chunks[index]["point"] is not None
     ]
     return (substantive_indices or indices)[:MAX_COMPLETE_SCOPE_CHUNKS]
+
+
+def _dependent_article_indices(
+    question: str,
+    chunks: list[dict],
+    selected_indices: list[int],
+    ranking_scores: np.ndarray,
+) -> list[int]:
+    query_tokens = set(_query_tokens(question))
+    requests_clause_contents = bool(
+        query_tokens
+        & {
+            "contain",
+            "contains",
+            "content",
+            "details",
+            "include",
+            "includes",
+            "information",
+        }
+    )
+    selected_articles = {chunks[index]["article"] for index in selected_indices}
+    dependencies: list[int] = []
+
+    for source_index in selected_indices:
+        source = chunks[source_index]
+        source_tokens = set(_keyword_tokens(source["content"]))
+        coverage = (
+            len(query_tokens & source_tokens) / len(query_tokens)
+            if query_tokens
+            else 0.0
+        )
+        if coverage < MIN_QUERY_COVERAGE:
+            continue
+        for article_number, paragraph in ARTICLE_CITATION.findall(source["content"]):
+            article = f"article {article_number}".casefold()
+            if any(str(value).casefold() == article for value in selected_articles):
+                continue
+            article_indices = [
+                index
+                for index, chunk in enumerate(chunks)
+                if chunk["document_id"] == source["document_id"]
+                and str(chunk["article"]).casefold() == article
+                and chunk["point"] is None
+                and chunk["subpoint"] is None
+            ]
+            governing = [
+                index for index in article_indices if chunks[index]["paragraph"] == "1"
+            ]
+            cited = [
+                index
+                for index in article_indices
+                if paragraph and chunks[index]["paragraph"] == paragraph
+            ]
+            if governing:
+                dependencies.append(
+                    max(governing, key=lambda index: float(ranking_scores[index]))
+                )
+            if cited:
+                cited_index = max(
+                    cited,
+                    key=lambda index: float(ranking_scores[index]),
+                )
+                has_child_points = any(
+                    chunk["document_id"] == source["document_id"]
+                    and str(chunk["article"]).casefold() == article
+                    and chunk["paragraph"] == paragraph
+                    and chunk["point"] is not None
+                    for chunk in chunks
+                )
+                if requests_clause_contents or not has_child_points:
+                    dependencies.extend(
+                        _focused_clause_indices(chunks, cited_index)
+                    )
+            if dependencies:
+                return list(dict.fromkeys(dependencies))
+    return []
 
 
 def _retrieved_chunk(
@@ -568,6 +742,435 @@ def _retrieved_chunk(
         subpoint=chunk["subpoint"],
         score=score,
     )
+
+
+def _merged_retrieved_chunks(
+    chunks: list[dict],
+    indices: list[int],
+    similarities: np.ndarray,
+) -> list[RetrievedChunk]:
+    grouped: dict[tuple, list[int]] = {}
+    for index in indices:
+        chunk = chunks[index]
+        hierarchy = (
+            chunk["article"],
+            chunk["paragraph"],
+            chunk["point"],
+            chunk["subpoint"],
+        )
+        key = (chunk["document_id"], *hierarchy)
+        if not any(hierarchy):
+            key = (*key, chunk["id"])
+        grouped.setdefault(key, []).append(index)
+
+    results: list[RetrievedChunk] = []
+    for grouped_indices in grouped.values():
+        base_index = grouped_indices[0]
+        base = _retrieved_chunk(
+            chunks[base_index],
+            max(float(similarities[index]) for index in grouped_indices),
+        )
+        contents = list(
+            dict.fromkeys(chunks[index]["content"].strip() for index in grouped_indices)
+        )
+        if len(contents) > 1:
+            base.content = "\n".join(contents)
+        results.append(base)
+    return results
+
+def _document_name_tokens(file_name: str) -> set[str]:
+    return {
+        token
+        for token in _keyword_tokens(file_name)
+        if token not in DOCUMENT_NAME_STOP_WORDS and not token.isdigit()
+    }
+
+
+def _document_name_match(question: str, file_name: str) -> float:
+    query_tokens = set(_query_tokens(question))
+    name_tokens = _document_name_tokens(file_name)
+    if not name_tokens:
+        return 0.0
+    return len(query_tokens & name_tokens) / len(name_tokens)
+
+
+def mentions_multiple_documents(question: str, file_names: list[str]) -> bool:
+    return sum(_document_name_match(question, name) > 0 for name in file_names) >= 2
+
+
+def _explicit_article_number(question: str, file_name: str) -> str | None:
+    matches = list(ARTICLE_CITATION.finditer(question))
+    if not matches:
+        return None
+
+    name_tokens = _document_name_tokens(file_name)
+    for match in matches:
+        prefix = question[max(0, match.start() - 50) : match.start()]
+        prefix_tokens = set(_query_tokens(prefix))
+        if prefix_tokens & name_tokens:
+            return match.group(1)
+
+    return None
+
+
+def _article_anchor_index(
+    article_number: str,
+    chunks: list[dict],
+    indices: list[int],
+    ranking_scores: np.ndarray,
+) -> int | None:
+    article = f"article {article_number}".casefold()
+    matching = [
+        index
+        for index in indices
+        if str(chunks[index]["article"]).casefold() == article
+    ]
+    if not matching:
+        return None
+    headings = [
+        index
+        for index in matching
+        if chunks[index]["paragraph"] is None
+        and chunks[index]["point"] is None
+        and chunks[index]["subpoint"] is None
+    ]
+    candidates = headings or matching
+    return max(candidates, key=lambda index: float(ranking_scores[index]))
+
+
+def _explicit_query_anchor(
+    question: str,
+    chunks: list[dict],
+    ranking_scores: np.ndarray,
+) -> int | None:
+    document_indices: dict[int, list[int]] = {}
+    for index, chunk in enumerate(chunks):
+        document_indices.setdefault(chunk["document_id"], []).append(index)
+
+    anchors = []
+    for indices in document_indices.values():
+        article_number = _explicit_article_number(
+            question,
+            chunks[indices[0]]["original_name"],
+        )
+        if article_number is None:
+            continue
+        anchor = _article_anchor_index(
+            article_number,
+            chunks,
+            indices,
+            ranking_scores,
+        )
+        if anchor is not None:
+            anchors.append(anchor)
+    if anchors:
+        return max(anchors, key=lambda index: float(ranking_scores[index]))
+
+    citations = ARTICLE_CITATION.findall(question)
+    if len(citations) != 1:
+        return None
+    article_number, _ = citations[0]
+    return _article_anchor_index(
+        article_number,
+        chunks,
+        list(range(len(chunks))),
+        ranking_scores,
+    )
+
+
+def _legal_authority_adjustment(chunk: dict) -> float:
+    if chunk["article"] is not None:
+        return OPERATIVE_CLAUSE_BONUS + _normative_clause_bonus(chunk)
+    section = str(chunk.get("section") or "").casefold()
+    return -PREAMBLE_PENALTY if "preamble" in section else 0.0
+
+
+def _normative_clause_bonus(chunk: dict) -> float:
+    if chunk["article"] is None:
+        return 0.0
+    content_tokens = set(
+        _keyword_tokens(
+            " ".join(
+                part for part in (chunk.get("section"), chunk["content"]) if part
+            )
+        )
+    )
+    return NORMATIVE_CLAUSE_BONUS if content_tokens & NORMATIVE_TERMS else 0.0
+
+
+def _external_reference_anchor(
+    selected_indices: list[int],
+    chunks: list[dict],
+    selected_document_ids: set[int],
+    ranking_scores: np.ndarray,
+) -> tuple[int, int] | None:
+    """Resolve an EU Regulation citation into an article in another selected file."""
+    for source_index in selected_indices:
+        for article_number, year, regulation_number in (
+            EXTERNAL_REGULATION_CITATION.findall(chunks[source_index]["content"])
+        ):
+            for target_document_id in selected_document_ids:
+                if target_document_id == chunks[source_index]["document_id"]:
+                    continue
+                target_indices = [
+                    index
+                    for index, chunk in enumerate(chunks)
+                    if chunk["document_id"] == target_document_id
+                ]
+                if not target_indices:
+                    continue
+                file_name_numbers = {
+                    str(int(number))
+                    for number in re.findall(
+                        r"\d+", chunks[target_indices[0]]["original_name"]
+                    )
+                }
+                identifier_matches = (
+                    year in file_name_numbers
+                    and regulation_number in file_name_numbers
+                )
+                if not identifier_matches:
+                    continue
+                article_indices = [
+                    index
+                    for index in target_indices
+                    if str(chunks[index]["article"]).casefold()
+                    == f"article {article_number}".casefold()
+                ]
+                if article_indices:
+                    heading_indices = [
+                        index
+                        for index in article_indices
+                        if chunks[index]["paragraph"] is None
+                        and chunks[index]["point"] is None
+                    ]
+                    candidates = heading_indices or article_indices
+                    return target_document_id, max(
+                        candidates,
+                        key=lambda index: float(ranking_scores[index]),
+                    )
+    return None
+
+
+def _comparison_clause_indices(
+    question: str,
+    chunks: list[dict],
+    anchor_index: int,
+    ranking_scores: np.ndarray,
+) -> list[int]:
+    anchor = chunks[anchor_index]
+    maximum_chunks = (
+        MAX_COMPARISON_CHUNKS_PER_DOCUMENT
+        if is_list_question(question)
+        else 1
+    )
+    document_name_tokens = set().union(
+        *(_document_name_tokens(chunk["original_name"]) for chunk in chunks)
+    )
+    topic_tokens = set(_query_tokens(question)) - document_name_tokens
+    topic_tokens -= COMPARISON_META_TERMS
+    if anchor["article"] is None:
+        same_document = [
+            index
+            for index in np.argsort(ranking_scores)[::-1]
+            if chunks[int(index)]["document_id"] == anchor["document_id"]
+        ]
+        selected_indices = [int(index) for index in same_document[:maximum_chunks]]
+    elif anchor["point"] is not None or anchor["paragraph"] is not None:
+        selected_indices = _focused_clause_indices(chunks, anchor_index)
+    else:
+        paragraph_index = _paragraph_anchor_index(
+            question,
+            chunks,
+            anchor_index,
+            ranking_scores,
+        )
+        selected_indices = (
+            _focused_clause_indices(chunks, paragraph_index)
+            if paragraph_index is not None
+            else [anchor_index]
+        )
+
+    broad_rule_question = any(
+        term in set(_query_tokens(question))
+        for term in {"rule", "rules", "regulate", "regulates"}
+    )
+    if (
+        broad_rule_question
+        and anchor["paragraph"] not in {None, "1"}
+        and anchor["point"] is None
+    ):
+        governing_indices = [
+            index
+            for index, chunk in enumerate(chunks)
+            if chunk["document_id"] == anchor["document_id"]
+            and chunk["article"] == anchor["article"]
+            and chunk["paragraph"] == "1"
+            and chunk["point"] is None
+            and chunk["subpoint"] is None
+        ]
+        if governing_indices:
+            governing_index = max(
+                governing_indices,
+                key=lambda index: float(ranking_scores[index]),
+            )
+            selected_indices = list(
+                dict.fromkeys([governing_index, *selected_indices])
+            )
+
+    selected_articles = {
+        chunks[index]["article"]
+        for index in selected_indices
+        if chunks[index]["article"]
+    }
+    ranked_document_indices = [
+        int(index)
+        for index in np.argsort(ranking_scores)[::-1]
+        if chunks[int(index)]["document_id"] == anchor["document_id"]
+    ]
+    for index in ranked_document_indices:
+        if len(selected_indices) >= maximum_chunks:
+            break
+        article = chunks[index]["article"]
+        if (
+            index in selected_indices
+            or article is None
+            or article in selected_articles
+            or _normative_clause_bonus(chunks[index]) == 0
+        ):
+            continue
+        candidate_tokens = set(
+            _keyword_tokens(
+                "\n".join(
+                    part
+                    for part in (chunks[index]["section"], chunks[index]["content"])
+                    if part
+                )
+            )
+        )
+        coverage = (
+            len(topic_tokens & candidate_tokens) / len(topic_tokens)
+            if topic_tokens
+            else 0.0
+        )
+        if coverage < MIN_SUPPLEMENTAL_QUERY_COVERAGE:
+            continue
+        selected_indices.extend(_focused_clause_indices(chunks, index))
+        selected_articles.add(article)
+
+    return list(dict.fromkeys(selected_indices))
+
+
+def _comparison_indices(
+    question: str,
+    chunks: list[dict],
+    searchable_documents: list[str],
+    similarities: np.ndarray,
+    ranking_scores: np.ndarray,
+    min_similarity: float,
+) -> list[int]:
+    document_indices: dict[int, list[int]] = {}
+    for index, chunk in enumerate(chunks):
+        document_indices.setdefault(chunk["document_id"], []).append(index)
+
+    candidates: list[tuple[bool, float, int]] = []
+    for indices in document_indices.values():
+        file_name = chunks[indices[0]]["original_name"]
+        explicit_article = _explicit_article_number(question, file_name)
+        anchor_index = (
+            _article_anchor_index(
+                explicit_article,
+                chunks,
+                indices,
+                ranking_scores,
+            )
+            if explicit_article is not None
+            else None
+        )
+        if anchor_index is None:
+            anchor_index = max(
+                indices,
+                key=lambda index: (
+                    float(ranking_scores[index])
+                    + _legal_authority_adjustment(chunks[index])
+                ),
+            )
+        elif not any(paragraph for _, paragraph in ARTICLE_CITATION.findall(question)):
+            governing_indices = [
+                index
+                for index in indices
+                if chunks[index]["article"] == chunks[anchor_index]["article"]
+                and chunks[index]["paragraph"] == "1"
+                and chunks[index]["point"] is None
+                and chunks[index]["subpoint"] is None
+            ]
+            if governing_indices:
+                anchor_index = max(
+                    governing_indices,
+                    key=lambda index: float(ranking_scores[index]),
+                )
+        anchor = chunks[anchor_index]
+        name_match = _document_name_match(question, anchor["original_name"])
+        ranking_score = float(ranking_scores[anchor_index])
+        relevant = _passes_relevance_gate(
+            question,
+            searchable_documents[anchor_index],
+            float(similarities[anchor_index]),
+            0.0,
+        )
+        if (
+            explicit_article is None and ranking_score < min_similarity
+        ) or (name_match == 0 and not relevant):
+            continue
+        candidates.append(
+            (
+                name_match > 0,
+                ranking_score + DOCUMENT_NAME_MATCH_BONUS * name_match,
+                anchor_index,
+            )
+        )
+
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    mentioned = [candidate for candidate in candidates if candidate[0]]
+    if not is_comparison_question(question) and len(mentioned) < 2:
+        return []
+    selected = mentioned if len(mentioned) >= 2 else candidates
+    selected = selected[:MAX_COMPARISON_DOCUMENTS]
+    if len(selected) < 2:
+        return []
+
+    anchors = {
+        chunks[anchor_index]["document_id"]: anchor_index
+        for *_, anchor_index in selected
+    }
+    selected_document_ids = set(anchors)
+    for anchor_index in tuple(anchors.values()):
+        source_indices = _comparison_clause_indices(
+            question,
+            chunks,
+            anchor_index,
+            ranking_scores,
+        )
+        external_reference = _external_reference_anchor(
+            source_indices,
+            chunks,
+            selected_document_ids,
+            ranking_scores,
+        )
+        if external_reference is not None:
+            target_document_id, target_anchor_index = external_reference
+            anchors[target_document_id] = target_anchor_index
+
+    comparison_indices: list[int] = []
+    for anchor_index in anchors.values():
+        clause_indices = _comparison_clause_indices(
+            question,
+            chunks,
+            anchor_index,
+            ranking_scores,
+        )
+        comparison_indices.extend(clause_indices)
+    return list(dict.fromkeys(comparison_indices))
 
 
 def retrieve_relevant_chunks(
@@ -613,6 +1216,7 @@ def retrieve_relevant_chunks(
     maximum_keyword_score = float(keyword_scores.max())
     if maximum_keyword_score > 0:
         keyword_scores /= maximum_keyword_score
+    phrase_scores = phrase_match_scores(question, searchable_documents)
 
     expansion_terms = _automatic_expansion_terms(
         question,
@@ -636,6 +1240,7 @@ def retrieve_relevant_chunks(
     base_ranking_scores = (
         similarities
         + KEYWORD_WEIGHT * keyword_scores
+        + PHRASE_MATCH_WEIGHT * phrase_scores
         + QUERY_EXPANSION_WEIGHT * expansion_scores
         + DEFINITION_MATCH_BONUS * definition_scores
     )
@@ -645,13 +1250,54 @@ def retrieve_relevant_chunks(
         return []
 
     original_top_index = int(ranked_indices[0])
+    explicit_query_anchor = _explicit_query_anchor(
+        question,
+        chunks,
+        base_ranking_scores,
+    )
+    lexical_scores = keyword_scores + phrase_scores
+    lexical_top_index = int(np.argmax(lexical_scores))
+    lexical_document = searchable_documents[lexical_top_index]
+    strong_lexical_anchor = (
+        max(
+            float(keyword_scores[lexical_top_index]),
+            float(phrase_scores[lexical_top_index]),
+        )
+        >= LEXICAL_ANCHOR_MIN_SCORE
+        and _query_coverage(question, lexical_document)
+        >= LEXICAL_ANCHOR_MIN_COVERAGE
+    )
+    if explicit_query_anchor is not None:
+        original_top_index = explicit_query_anchor
+    elif strong_lexical_anchor:
+        original_top_index = lexical_top_index
+
     semantic_top_index = int(np.argmax(similarities))
     if (
-        float(similarities[semantic_top_index])
+        explicit_query_anchor is None
+        and not strong_lexical_anchor
+        and float(similarities[semantic_top_index])
         - float(similarities[original_top_index])
         >= SEMANTIC_OVERRIDE_MARGIN
     ):
         original_top_index = semantic_top_index
+
+    comparison_ranking_scores = (
+        similarities
+        + COMPARISON_KEYWORD_WEIGHT * keyword_scores
+        + PHRASE_MATCH_WEIGHT * phrase_scores
+        + DEFINITION_MATCH_BONUS * definition_scores
+    )
+    comparison_indices = _comparison_indices(
+        question,
+        chunks,
+        searchable_documents,
+        similarities,
+        comparison_ranking_scores,
+        min_similarity,
+    )
+    if comparison_indices:
+        return _merged_retrieved_chunks(chunks, comparison_indices, similarities)
 
     reference_target_index = _referenced_clause_target_index(
         expanded_question,
@@ -697,20 +1343,39 @@ def retrieve_relevant_chunks(
         ]
 
     if scope == QuestionScope.COMPLETE_LIST:
-        heading_index = _article_heading_index(
-            expanded_question,
-            chunks,
-            base_ranking_scores,
-        )
-        anchor_index = (
-            heading_index if heading_index is not None else original_top_index
-        )
+        if chunks[original_top_index]["article"] is not None:
+            anchor_index = original_top_index
+        else:
+            heading_index = _article_heading_index(
+                question,
+                chunks,
+                base_ranking_scores,
+            )
+            anchor_index = (
+                heading_index if heading_index is not None else original_top_index
+            )
         if chunks[anchor_index]["article"] is not None:
             selected_indices = _complete_scope_indices(
                 chunks,
                 anchor_index,
                 original_top_index,
             )
+            dependent_indices = _dependent_article_indices(
+                question,
+                chunks,
+                selected_indices,
+                base_ranking_scores,
+            )
+            if dependent_indices:
+                parent_indices = [
+                    index
+                    for index in selected_indices
+                    if chunks[index]["point"] is None
+                    and chunks[index]["subpoint"] is None
+                ][:2]
+                selected_indices = list(
+                    dict.fromkeys([*dependent_indices, *parent_indices])
+                )
             return [
                 _retrieved_chunk(chunks[index], float(similarities[index]))
                 for index in selected_indices
