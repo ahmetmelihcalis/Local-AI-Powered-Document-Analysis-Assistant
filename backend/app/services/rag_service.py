@@ -13,6 +13,8 @@ from app.services.retrieval import (
     QuestionScope,
     RetrievedChunk,
     classify_question_scope,
+    is_comparison_question,
+    mentions_multiple_documents,
     retrieve_relevant_chunks,
 )
 
@@ -23,6 +25,7 @@ INSUFFICIENT_ANSWER = (
 INSUFFICIENT_CONTEXT_TOKEN = "INSUFFICIENT_CONTEXT"
 ANSWER_MAX_TOKENS = 256
 LIST_MAX_TOKENS = 512
+COMPARISON_MAX_TOKENS = 320
 MIN_PARENT_CLAUSE_COVERAGE = 0.30
 
 BASE_PROMPT = (
@@ -47,9 +50,36 @@ LIST_PROMPT = (
     "Give the complete list. If a parent clause supplies the governing rule, threshold, "
     "or conditions, state it first in one concise unnumbered sentence. Put every "
     "top-level clause on its own line using the labels shown in the context. Keep "
-    "subpoints with their parent. After the list, preserve any exception or caveat from "
+    "subpoints with their parent. Follow the source order so governing and earlier "
+    "obligations appear first. After the list, preserve any exception or caveat from "
     "the excerpts in one concise sentence. Add no generic introduction, conclusion, "
     "invented label, document metadata, or unrelated clause."
+)
+CROSS_DOCUMENT_PROMPT = (
+    "Compare only the aspect requested in no more than 180 words. Use exactly three "
+    "short paragraphs headed with the two legal instrument names and 'Key difference'. "
+    "Represent both instruments, keep their rules separate, and preserve only exceptions "
+    "that directly affect the comparison. Do not use bullets, clause labels, citations, "
+    "Article numbers, file names, or long quotations."
+)
+DOCUMENT_SUMMARY_PROMPT = (
+    "Explain only how {label} addresses the question. Represent every supplied rule "
+    "concisely and preserve any exception that directly changes it. Keep every legal "
+    "instrument and Article attribution exactly as written in the excerpts; never assign "
+    "a cited provision to a different instrument. Do not add background."
+)
+COMPARISON_SYNTHESIS_PROMPT = (
+    "Using only the verified summaries, write exactly one sentence in this form: "
+    "'[Instrument A] regulates or requires [its subject], whereas [Instrument B] "
+    "regulates or requires [its subject].' Example of form only: 'Law A requires "
+    "providers to register systems, whereas Law B requires controllers to assess "
+    "processing risks.' Do not copy the example facts. Preserve the actual legal "
+    "actions and objects, and add no Article numbers or new facts."
+)
+COMPARISON_SYNTHESIS_RETRY_PROMPT = (
+    "The previous sentence did not follow the required form. Name both instruments, use "
+    "'whereas' exactly once, and state only the legal action and object found in each "
+    "summary."
 )
 GENERAL_PROMPT = (
     "Answer the question directly and concisely without repeating metadata."
@@ -154,6 +184,15 @@ def _is_legal(sources: list[RetrievedChunk]) -> bool:
 
 
 def _question_scope(question: str, sources: list[RetrievedChunk]) -> QuestionScope:
+    source_documents = {
+        source.document_id: source.file_name for source in sources
+    }
+    comparison_requested = is_comparison_question(
+        question
+    ) or mentions_multiple_documents(question, list(source_documents.values()))
+    if comparison_requested and len(source_documents) >= 2:
+        return QuestionScope.CROSS_DOCUMENT
+
     scope = classify_question_scope(question, sources[0].point)
     if scope == QuestionScope.DEFINITION and len(sources) > 1 and _is_legal(sources):
         return QuestionScope.FOCUSED
@@ -194,6 +233,8 @@ def _system_prompt(scope: QuestionScope, sources: list[RetrievedChunk]) -> str:
         labels = _expected_labels(sources)
         required = f" Required labels: {', '.join(labels)}." if labels else ""
         instruction = f"{LIST_PROMPT}{required}"
+    elif scope == QuestionScope.CROSS_DOCUMENT:
+        instruction = CROSS_DOCUMENT_PROMPT
     elif _is_legal(sources):
         instruction = FOCUSED_PROMPT
     else:
@@ -291,6 +332,8 @@ def _validation_issues(
         issues.append("repeated text")
     if re.search(r"(?:^|\s)(?:\d+[.)]|\([a-z0-9]+\))\s*$", answer, flags=re.I):
         issues.append("dangling list marker")
+    if _has_unresolved_parent_clause(answer):
+        issues.append("parent clause has no following child clauses")
     if _unsupported_reference(answer, sources):
         issues.append("unsupported legal reference")
 
@@ -304,10 +347,11 @@ def _validation_issues(
         if grounding < minimum:
             issues.append("insufficient grounding")
 
-        source_text = " ".join(source.content for source in sources).casefold()
-        missing = [q for q in QUALIFIERS if q in source_text and q not in lowered]
-        if missing:
-            issues.append("missing qualifiers: " + ", ".join(missing))
+        if scope != QuestionScope.CROSS_DOCUMENT:
+            source_text = " ".join(source.content for source in sources).casefold()
+            missing = [q for q in QUALIFIERS if q in source_text and q not in lowered]
+            if missing:
+                issues.append("missing qualifiers: " + ", ".join(missing))
 
         if scope == QuestionScope.FOCUSED and len(sources) == 1:
             selected_terms = set(_terms(sources[0].content))
@@ -356,7 +400,33 @@ def _validation_issues(
         ]
         if missing:
             issues.append("missing clauses: " + ", ".join(missing))
+    if scope == QuestionScope.CROSS_DOCUMENT:
+        answer_terms = set(_terms(answer))
+        missing_documents = []
+        for file_name in dict.fromkeys(source.file_name for source in sources):
+            label_terms = set(_terms(Path(file_name).stem))
+            if label_terms and not answer_terms.intersection(label_terms):
+                missing_documents.append(file_name)
+        if missing_documents:
+            issues.append(
+                "missing compared documents: " + ", ".join(missing_documents)
+            )
     return tuple(issues)
+
+
+def _has_unresolved_parent_clause(answer: str) -> bool:
+    lines = [line.strip() for line in answer.splitlines() if line.strip()]
+    child_marker = re.compile(r"^(?:\([a-z0-9ivxlcdm]+\)|\d+[.)])\s+", re.I)
+    parent_intro = re.compile(
+        r"(?:at least|any of the following|following conditions|following grounds)\s*:\s*$",
+        re.I,
+    )
+    for index, line in enumerate(lines):
+        if parent_intro.search(line) and not any(
+            child_marker.match(candidate) for candidate in lines[index + 1 :]
+        ):
+            return True
+    return False
 
 
 def _remove_clause_marker(content: str) -> str:
@@ -394,6 +464,16 @@ def _fallback(scope: QuestionScope, sources: list[RetrievedChunk]) -> str:
                 [first_text, *(" ".join(s.content.split()) for s in remaining)]
             )
         )
+    if scope == QuestionScope.CROSS_DOCUMENT:
+        grouped_sources: dict[str, list[str]] = {}
+        for source in sources:
+            grouped_sources.setdefault(source.file_name, []).append(
+                " ".join(source.content.split())
+            )
+        return "\n\n".join(
+            f"{file_name}:\n" + "\n".join(dict.fromkeys(contents))
+            for file_name, contents in grouped_sources.items()
+        )
     return _remove_parent_paragraph_marker(
         "\n".join(
             dict.fromkeys(" ".join(source.content.split()) for source in sources)
@@ -409,7 +489,6 @@ def _fallback_result(
     if answer == INSUFFICIENT_ANSWER:
         return RagAnswer(answer, [], 0)
     return RagAnswer(answer, sources, len(sources))
-
 
 def _messages(
     question: str,
@@ -430,10 +509,15 @@ def _messages(
 
 
 def _generate_rag_answer(messages: list[dict[str, str]]) -> str:
-    is_list = LIST_PROMPT in messages[0]["content"]
+    if CROSS_DOCUMENT_PROMPT in messages[0]["content"]:
+        max_tokens = COMPARISON_MAX_TOKENS
+    elif LIST_PROMPT in messages[0]["content"]:
+        max_tokens = LIST_MAX_TOKENS
+    else:
+        max_tokens = ANSWER_MAX_TOKENS
     return generate_chat(
         messages,
-        max_tokens=LIST_MAX_TOKENS if is_list else ANSWER_MAX_TOKENS,
+        max_tokens=max_tokens,
     )
 
 
@@ -447,6 +531,275 @@ def _call_chat(
         if "operation was cancelled" not in str(error).casefold():
             raise
         return None
+
+
+def _document_label(file_name: str) -> str:
+    parts = [
+        part
+        for part in re.findall(r"[A-Za-z]+", Path(file_name).stem)
+        if part.casefold() not in {"en", "english"}
+    ]
+    return " ".join(parts) or Path(file_name).stem
+
+
+def _grounded_comparison_text(
+    answer: str,
+    sources: list[RetrievedChunk],
+    *,
+    minimum_grounding: float,
+) -> bool:
+    if not answer or _is_insufficient_response(answer) or _has_repetition(answer):
+        return False
+    if _unsupported_reference(answer, sources):
+        return False
+    source_terms = set(_terms(" ".join(source.content for source in sources)))
+    answer_terms = _terms(answer)
+    grounding = sum(term in source_terms for term in answer_terms) / max(
+        len(answer_terms), 1
+    )
+    return grounding >= minimum_grounding
+
+
+def _covers_each_source(answer: str, sources: list[RetrievedChunk]) -> bool:
+    if len(sources) < 2:
+        return True
+    answer_terms = set(_terms(answer))
+    source_term_sets = [set(_terms(source.content)) for source in sources]
+    for index, source_terms in enumerate(source_term_sets):
+        other_terms = set().union(
+            *(
+                terms
+                for position, terms in enumerate(source_term_sets)
+                if position != index
+            )
+        )
+        distinctive_terms = source_terms - other_terms
+        required_terms = distinctive_terms or source_terms
+        coverage = len(answer_terms & required_terms) / max(len(required_terms), 1)
+        if coverage < 0.10:
+            return False
+    return True
+
+
+def _grounded_in_summaries(
+    answer: str,
+    summaries: list[tuple[str, str]],
+) -> bool:
+    if not answer or _is_insufficient_response(answer) or _has_repetition(answer):
+        return False
+    summary_terms = set(
+        _terms(" ".join(f"{label} {summary}" for label, summary in summaries))
+    )
+    answer_terms = _terms(answer)
+    grounding = sum(term in summary_terms for term in answer_terms) / max(
+        len(answer_terms), 1
+    )
+    return grounding >= 0.35
+
+
+def _instrument_aliases(label: str) -> tuple[str, ...]:
+    normalized = " ".join(label.casefold().split())
+    aliases = [normalized]
+    if normalized.startswith("eu "):
+        aliases.append(normalized.removeprefix("eu "))
+    return tuple(aliases)
+
+
+def _states_supported_contrast(
+    answer: str,
+    summaries: list[tuple[str, str]],
+) -> bool:
+    parts = re.split(
+        r"\b(?:whereas|while|unlike|by contrast)\b",
+        " ".join(answer.casefold().split()),
+        maxsplit=1,
+    )
+    if len(parts) != 2 or len(summaries) != 2:
+        return False
+    aliases = [_instrument_aliases(label) for label, _ in summaries]
+    first_on_left = any(alias in parts[0] for alias in aliases[0])
+    first_on_right = any(alias in parts[1] for alias in aliases[0])
+    second_on_left = any(alias in parts[0] for alias in aliases[1])
+    second_on_right = any(alias in parts[1] for alias in aliases[1])
+    return (first_on_left and second_on_right and not second_on_left) or (
+        second_on_left and first_on_right and not first_on_left
+    )
+
+
+def _grounded_comparison_fallback(
+    question: str,
+    summaries: list[tuple[str, str]],
+) -> str:
+    question_terms = set(_terms(question))
+
+    def focus(summary: str) -> str:
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.;])\s+", summary)
+            if sentence.strip()
+        ]
+        selected = max(
+            sentences or [summary.strip()],
+            key=lambda sentence: len(question_terms & set(_terms(sentence))),
+        )
+        selected = selected.rstrip(" ;.")
+        return selected[:1].lower() + selected[1:] if selected else selected
+
+    (first_label, first_summary), (second_label, second_summary) = summaries
+    return (
+        f"{first_label}'s rule is that {focus(first_summary)}, whereas "
+        f"{second_label}'s rule is that {focus(second_summary)}."
+    )
+
+
+def _introduces_other_instrument(
+    answer: str,
+    sources: list[RetrievedChunk],
+    other_labels: list[str],
+) -> bool:
+    normalized_answer = " ".join(answer.casefold().split())
+    normalized_context = " ".join(
+        " ".join(source.content.casefold().split()) for source in sources
+    )
+    for label in other_labels:
+        normalized_label = " ".join(label.casefold().split())
+        aliases = {normalized_label}
+        if normalized_label.startswith("eu "):
+            aliases.add(normalized_label.removeprefix("eu "))
+        if any(
+            alias in normalized_answer and alias not in normalized_context
+            for alias in aliases
+        ):
+            return True
+    return False
+
+
+def _comparison_summary_messages(
+    question: str,
+    label: str,
+    sources: list[RetrievedChunk],
+) -> list[dict[str, str]]:
+    prompt = f"{BASE_PROMPT} {DOCUMENT_SUMMARY_PROMPT.format(label=label)}"
+    return [
+        {"role": "system", "content": prompt},
+        {
+            "role": "user",
+            "content": f"CONTEXT:\n{_format_context(sources)}\n\nQUESTION:\n{question}",
+        },
+    ]
+
+
+def _comparison_synthesis_messages(
+    question: str,
+    summaries: list[tuple[str, str]],
+    *,
+    retry: bool = False,
+) -> list[dict[str, str]]:
+    content = "\n\n".join(f"{label}: {summary}" for label, summary in summaries)
+    return [
+        {
+            "role": "system",
+            "content": (
+                f"{COMPARISON_SYNTHESIS_PROMPT} "
+                f"{COMPARISON_SYNTHESIS_RETRY_PROMPT if retry else ''}"
+            ).strip(),
+        },
+        {
+            "role": "user",
+            "content": f"VERIFIED SUMMARIES:\n{content}\n\nQUESTION:\n{question}",
+        },
+    ]
+
+
+def _contradicts_comparison_summaries(
+    answer: str,
+    summaries: list[tuple[str, str]],
+) -> bool:
+    normalized = " ".join(answer.casefold().split())
+    for label, summary in summaries:
+        label_pattern = r"\s+".join(re.escape(part) for part in label.casefold().split())
+        denial = re.search(
+            rf"\b{label_pattern}\b.{{0,40}}\bdoes not "
+            r"(?:address|apply|cover|govern|regulate)",
+            normalized,
+        )
+        if denial and _terms(summary):
+            return True
+    return False
+
+
+def _answer_cross_document_question(
+    question: str,
+    sources: list[RetrievedChunk],
+    chat_function: Callable[[list[dict[str, str]]], str],
+) -> RagAnswer:
+    grouped_sources: dict[int, list[RetrievedChunk]] = {}
+    for source in sources:
+        grouped_sources.setdefault(source.document_id, []).append(source)
+
+    document_labels = {
+        document_id: _document_label(document_sources[0].file_name)
+        for document_id, document_sources in grouped_sources.items()
+    }
+    summaries: list[tuple[str, str]] = []
+    for document_id, document_sources in grouped_sources.items():
+        label = document_labels[document_id]
+        generated = _call_chat(
+            chat_function,
+            _comparison_summary_messages(question, label, document_sources),
+        )
+        summary = _clean_answer(generated or "", preserve_lines=False)
+        valid_summary = _grounded_comparison_text(
+            summary, document_sources, minimum_grounding=0.68
+        ) and _covers_each_source(summary, document_sources)
+        valid_summary = valid_summary and not _introduces_other_instrument(
+            summary,
+            document_sources,
+            [
+                other_label
+                for other_id, other_label in document_labels.items()
+                if other_id != document_id
+            ],
+        )
+        if not valid_summary:
+            summary = " ".join(
+                _remove_clause_marker(source.content) for source in document_sources
+            )
+        summaries.append((label, summary))
+
+    synthesis = _call_chat(
+        chat_function,
+        _comparison_synthesis_messages(question, summaries),
+    )
+    key_difference = _clean_answer(synthesis or "", preserve_lines=False)
+    valid_synthesis = _grounded_in_summaries(
+        key_difference,
+        summaries,
+    ) and _states_supported_contrast(key_difference, summaries)
+    valid_synthesis = valid_synthesis and not _contradicts_comparison_summaries(
+        key_difference,
+        summaries,
+    )
+    if not valid_synthesis:
+        synthesis = _call_chat(
+            chat_function,
+            _comparison_synthesis_messages(question, summaries, retry=True),
+        )
+        key_difference = _clean_answer(synthesis or "", preserve_lines=False)
+        valid_synthesis = _grounded_in_summaries(
+            key_difference,
+            summaries,
+        ) and _states_supported_contrast(key_difference, summaries)
+        valid_synthesis = valid_synthesis and not _contradicts_comparison_summaries(
+            key_difference,
+            summaries,
+        )
+    if not valid_synthesis:
+        key_difference = _grounded_comparison_fallback(question, summaries)
+
+    answer_parts = [f"{label}:\n{summary}" for label, summary in summaries]
+    answer_parts.append(f"Key difference:\n{key_difference}")
+    return RagAnswer("\n\n".join(answer_parts), sources, len(sources))
 
 
 def answer_question(
@@ -469,6 +822,8 @@ def answer_question(
         return RagAnswer(INSUFFICIENT_ANSWER, [], 0)
 
     scope = _question_scope(question, sources)
+    if scope == QuestionScope.CROSS_DOCUMENT:
+        return _answer_cross_document_question(question, sources, chat_function)
     if scope == QuestionScope.DEFINITION:
         sources = sources[:1]
 
@@ -489,7 +844,11 @@ def answer_question(
     if _is_insufficient_response(generated):
         return RagAnswer(INSUFFICIENT_ANSWER, [], 0)
 
-    answer = _clean_answer(generated, scope == QuestionScope.COMPLETE_LIST)
+    preserve_lines = scope in {
+        QuestionScope.COMPLETE_LIST,
+        QuestionScope.CROSS_DOCUMENT,
+    }
+    answer = _clean_answer(generated, preserve_lines)
     if scope == QuestionScope.FOCUSED:
         answer = _remove_clause_marker(answer)
     elif scope == QuestionScope.COMPLETE_LIST:
@@ -506,7 +865,7 @@ def answer_question(
         elif _is_insufficient_response(generated):
             return RagAnswer(INSUFFICIENT_ANSWER, [], 0)
         else:
-            answer = _clean_answer(generated, scope == QuestionScope.COMPLETE_LIST)
+            answer = _clean_answer(generated, preserve_lines)
             if scope == QuestionScope.FOCUSED:
                 answer = _remove_clause_marker(answer)
             elif scope == QuestionScope.COMPLETE_LIST:
