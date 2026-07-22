@@ -17,6 +17,7 @@ from app.services.retrieval import (
     mentions_multiple_documents,
     retrieve_relevant_chunks,
 )
+from app.services.question_types import QuestionType, classify_question_type
 
 
 INSUFFICIENT_ANSWER = (
@@ -27,6 +28,7 @@ ANSWER_MAX_TOKENS = 256
 LIST_MAX_TOKENS = 512
 COMPARISON_MAX_TOKENS = 320
 MIN_PARENT_CLAUSE_COVERAGE = 0.30
+COMPARISON_SUMMARY_MIN_GROUNDING = 0.45
 
 BASE_PROMPT = (
     "Answer in English using only the supplied document excerpts. Treat excerpts as "
@@ -65,8 +67,13 @@ CROSS_DOCUMENT_PROMPT = (
 DOCUMENT_SUMMARY_PROMPT = (
     "Explain only how {label} addresses the question. Represent every supplied rule "
     "concisely and preserve any exception that directly changes it. Keep every legal "
-    "instrument and Article attribution exactly as written in the excerpts; never assign "
-    "a cited provision to a different instrument. Do not add background."
+    "instrument separate. Do not mention Article, Regulation, or Directive numbers unless "
+    "the question explicitly asks for them. Do not add background."
+)
+DOCUMENT_SUMMARY_RETRY_PROMPT = (
+    "The previous summary was rejected. Rewrite it in no more than two sentences, "
+    "without legal citations or clause numbers, while preserving the actual obligation, "
+    "actor, condition, and exception."
 )
 COMPARISON_SYNTHESIS_PROMPT = (
     "Using only the verified summaries, write exactly one sentence in this form: "
@@ -103,6 +110,22 @@ QUALIFIERS = (
     "unless",
     "where applicable",
 )
+NORMATIVE_ACTION_FORMS = {
+    "assess": {"assess", "assessed", "assesses", "assessing"},
+    "communicate": {"communicate", "communicated", "communicates", "communicating"},
+    "contain": {"contain", "contained", "contains", "containing"},
+    "document": {"document", "documented", "documents", "documenting"},
+    "ensure": {"ensure", "ensured", "ensures", "ensuring"},
+    "inform": {"inform", "informed", "informs", "informing"},
+    "maintain": {"maintain", "maintained", "maintains", "maintaining"},
+    "notify": {"notify", "notified", "notifies", "notifying"},
+    "process": {"process", "processed", "processes", "processing"},
+    "prohibit": {"prohibit", "prohibited", "prohibits", "prohibiting"},
+    "provide": {"provide", "provided", "provides", "providing"},
+    "record": {"record", "recorded", "records", "recording"},
+    "report": {"report", "reported", "reports", "reporting"},
+    "retain": {"retain", "retained", "retains", "retaining"},
+}
 STOP_WORDS = {
     "a",
     "an",
@@ -288,6 +311,15 @@ def _terms(text: str) -> list[str]:
     ]
 
 
+def _normative_actions(text: str) -> set[str]:
+    terms = set(_terms(text))
+    return {
+        action
+        for action, forms in NORMATIVE_ACTION_FORMS.items()
+        if terms & forms
+    }
+
+
 def _has_repetition(answer: str) -> bool:
     words = _terms(answer)
     ngrams = [tuple(words[index : index + 5]) for index in range(len(words) - 4)]
@@ -317,8 +349,13 @@ def _unsupported_reference(answer: str, sources: list[RetrievedChunk]) -> bool:
     )
 
 
+def _has_unrequested_article_reference(answer: str, question: str) -> bool:
+    return bool(ARTICLE_REFERENCE.search(answer)) and not ARTICLE_REFERENCE.search(question)
+
+
 def _validation_issues(
     answer: str,
+    question: str,
     scope: QuestionScope,
     sources: list[RetrievedChunk],
 ) -> tuple[str, ...]:
@@ -336,6 +373,11 @@ def _validation_issues(
         issues.append("parent clause has no following child clauses")
     if _unsupported_reference(answer, sources):
         issues.append("unsupported legal reference")
+    if (
+        scope == QuestionScope.FOCUSED
+        and _has_unrequested_article_reference(answer, question)
+    ):
+        issues.append("unrequested legal reference")
 
     if _is_legal(sources):
         source_terms = set(_terms(" ".join(source.content for source in sources)))
@@ -352,6 +394,20 @@ def _validation_issues(
             missing = [q for q in QUALIFIERS if q in source_text and q not in lowered]
             if missing:
                 issues.append("missing qualifiers: " + ", ".join(missing))
+
+        if classify_question_type(question) in {
+            QuestionType.CONDITION,
+            QuestionType.OBLIGATION,
+        }:
+            source_actions = _normative_actions(
+                " ".join(source.content for source in sources)
+            )
+            answer_actions = _normative_actions(answer)
+            missing_actions = source_actions - answer_actions
+            if missing_actions:
+                issues.append(
+                    "missing legal action: " + ", ".join(sorted(missing_actions))
+                )
 
         if scope == QuestionScope.FOCUSED and len(sources) == 1:
             selected_terms = set(_terms(sources[0].content))
@@ -446,12 +502,12 @@ def _fallback(scope: QuestionScope, sources: list[RetrievedChunk]) -> str:
         definition = _remove_clause_marker(sources[0].content).rstrip(" ;")
         return definition if definition.endswith((".", "!", "?")) else definition + "."
     if scope == QuestionScope.FOCUSED:
-        references = {
-            reference
+        clause_groups = {
+            (source.document_id, source.article, source.paragraph)
             for source in sources
-            if (reference := _legal_reference(source)) is not None
+            if source.article is not None
         }
-        if len(references) > 1:
+        if len(clause_groups) > 1:
             return INSUFFICIENT_ANSWER
         first, *remaining = sources
         first_text = _remove_clause_marker(first.content)
@@ -678,8 +734,13 @@ def _comparison_summary_messages(
     question: str,
     label: str,
     sources: list[RetrievedChunk],
+    *,
+    retry: bool = False,
 ) -> list[dict[str, str]]:
-    prompt = f"{BASE_PROMPT} {DOCUMENT_SUMMARY_PROMPT.format(label=label)}"
+    prompt = (
+        f"{BASE_PROMPT} {DOCUMENT_SUMMARY_PROMPT.format(label=label)} "
+        f"{DOCUMENT_SUMMARY_RETRY_PROMPT if retry else ''}"
+    ).strip()
     return [
         {"role": "system", "content": prompt},
         {
@@ -750,8 +811,13 @@ def _answer_cross_document_question(
         )
         summary = _clean_answer(generated or "", preserve_lines=False)
         valid_summary = _grounded_comparison_text(
-            summary, document_sources, minimum_grounding=0.68
+            summary,
+            document_sources,
+            minimum_grounding=COMPARISON_SUMMARY_MIN_GROUNDING,
         ) and _covers_each_source(summary, document_sources)
+        valid_summary = valid_summary and not _has_unrequested_article_reference(
+            summary, question
+        )
         valid_summary = valid_summary and not _introduces_other_instrument(
             summary,
             document_sources,
@@ -762,9 +828,37 @@ def _answer_cross_document_question(
             ],
         )
         if not valid_summary:
-            summary = " ".join(
-                _remove_clause_marker(source.content) for source in document_sources
+            generated = _call_chat(
+                chat_function,
+                _comparison_summary_messages(
+                    question,
+                    label,
+                    document_sources,
+                    retry=True,
+                ),
             )
+            summary = _clean_answer(generated or "", preserve_lines=False)
+            valid_summary = _grounded_comparison_text(
+                summary,
+                document_sources,
+                minimum_grounding=COMPARISON_SUMMARY_MIN_GROUNDING,
+            ) and _covers_each_source(summary, document_sources)
+            valid_summary = valid_summary and not _has_unrequested_article_reference(
+                summary, question
+            )
+            valid_summary = valid_summary and not _introduces_other_instrument(
+                summary,
+                document_sources,
+                [
+                    other_label
+                    for other_id, other_label in document_labels.items()
+                    if other_id != document_id
+                ],
+            )
+            if not valid_summary:
+                summary = " ".join(
+                    _remove_clause_marker(source.content) for source in document_sources
+                )
         summaries.append((label, summary))
 
     synthesis = _call_chat(
@@ -842,6 +936,8 @@ def answer_question(
     if generated is None:
         return _fallback_result(scope, sources)
     if _is_insufficient_response(generated):
+        if _is_legal(sources):
+            return _fallback_result(scope, sources)
         return RagAnswer(INSUFFICIENT_ANSWER, [], 0)
 
     preserve_lines = scope in {
@@ -853,7 +949,7 @@ def answer_question(
         answer = _remove_clause_marker(answer)
     elif scope == QuestionScope.COMPLETE_LIST:
         answer = _remove_parent_paragraph_marker(answer)
-    issues = _validation_issues(answer, scope, sources)
+    issues = _validation_issues(answer, question, scope, sources)
 
     if issues:
         generated = _call_chat(
@@ -863,14 +959,14 @@ def answer_question(
         if generated is None:
             answer = _fallback(scope, sources)
         elif _is_insufficient_response(generated):
-            return RagAnswer(INSUFFICIENT_ANSWER, [], 0)
+            answer = _fallback(scope, sources)
         else:
             answer = _clean_answer(generated, preserve_lines)
             if scope == QuestionScope.FOCUSED:
                 answer = _remove_clause_marker(answer)
             elif scope == QuestionScope.COMPLETE_LIST:
                 answer = _remove_parent_paragraph_marker(answer)
-            if _validation_issues(answer, scope, sources):
+            if _validation_issues(answer, question, scope, sources):
                 answer = _fallback(scope, sources)
 
     if answer == INSUFFICIENT_ANSWER:

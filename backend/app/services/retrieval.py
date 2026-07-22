@@ -36,6 +36,8 @@ MEDIUM_CONFIDENCE_SCORE = 0.35
 MIN_RESULT_COUNT = 2
 ADJACENT_CHUNK_BONUS = 0.10
 UNSECTIONED_CONTEXT_WINDOW = 2
+LEGAL_HIERARCHY_CONTEXT_WEIGHT = 0.20
+HIERARCHY_CONTEXT_ANCHOR_MIN_COVERAGE = 0.60
 MAX_COMPLETE_SCOPE_CHUNKS = 20
 PARAGRAPH_QUERY_COVERAGE_WEIGHT = 0.12
 PARAGRAPH_CONTRAST_BONUS = 0.12
@@ -254,6 +256,29 @@ def _query_coverage(question: str, document: str) -> float:
     if not query_tokens:
         return 0.0
     return len(query_tokens & set(_keyword_tokens(document))) / len(query_tokens)
+
+
+def _legal_hierarchy_context_scores(question: str, chunks: list[dict]) -> np.ndarray:
+    """Score a legal parent clause together with its child points when needed."""
+    scores = np.zeros(len(chunks), dtype=np.float32)
+    hierarchy_groups: dict[tuple[int, str, str], list[int]] = {}
+    for index, chunk in enumerate(chunks):
+        if chunk["article"] is None or chunk["paragraph"] is None:
+            continue
+        key = (chunk["document_id"], chunk["article"], chunk["paragraph"])
+        hierarchy_groups.setdefault(key, []).append(index)
+
+    for indices in hierarchy_groups.values():
+        context = "\n".join(
+            part
+            for index in indices
+            for part in (chunks[index]["section"], chunks[index]["content"])
+            if part
+        )
+        coverage = _query_coverage(question, context)
+        for index in indices:
+            scores[index] = coverage
+    return scores
 
 
 def _automatic_expansion_terms(
@@ -1365,12 +1390,14 @@ def retrieve_relevant_chunks(
         question,
         [chunk["content"] for chunk in chunks],
     )
+    hierarchy_context_scores = _legal_hierarchy_context_scores(question, chunks)
     base_ranking_scores = (
         similarities
         + KEYWORD_WEIGHT * keyword_scores
         + PHRASE_MATCH_WEIGHT * phrase_scores
         + QUERY_EXPANSION_WEIGHT * expansion_scores
         + DEFINITION_MATCH_BONUS * definition_scores
+        + LEGAL_HIERARCHY_CONTEXT_WEIGHT * hierarchy_context_scores
     )
     base_ranking_scores += np.asarray(
         [_question_type_adjustment(question, document) for document in searchable_documents],
@@ -1409,6 +1436,8 @@ def retrieve_relevant_chunks(
         and not strong_lexical_anchor
         and _question_type_adjustment(question, searchable_documents[semantic_top_index])
         >= 0
+        and float(hierarchy_context_scores[original_top_index])
+        < HIERARCHY_CONTEXT_ANCHOR_MIN_COVERAGE
         and float(similarities[semantic_top_index])
         - float(similarities[original_top_index])
         >= SEMANTIC_OVERRIDE_MARGIN
@@ -1420,6 +1449,7 @@ def retrieve_relevant_chunks(
         + COMPARISON_KEYWORD_WEIGHT * keyword_scores
         + PHRASE_MATCH_WEIGHT * phrase_scores
         + DEFINITION_MATCH_BONUS * definition_scores
+        + LEGAL_HIERARCHY_CONTEXT_WEIGHT * hierarchy_context_scores
     )
     comparison_ranking_scores += np.asarray(
         [_question_type_adjustment(question, document) for document in searchable_documents],
@@ -1457,7 +1487,11 @@ def retrieve_relevant_chunks(
         top_document,
         float(similarities[original_top_index]),
         float(definition_scores[original_top_index]),
-    ) and not strong_lexical_anchor:
+    ) and not (
+        strong_lexical_anchor
+        or float(hierarchy_context_scores[original_top_index])
+        >= HIERARCHY_CONTEXT_ANCHOR_MIN_COVERAGE
+    ):
         return []
 
     if reference_target_index is not None:
