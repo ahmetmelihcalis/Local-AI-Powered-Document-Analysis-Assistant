@@ -11,6 +11,11 @@ import numpy as np
 from app.database import DATABASE_PATH
 from app.repositories.document_repository import get_chunks
 from app.services.foundry_service import create_embeddings
+from app.services.question_types import (
+    QuestionType,
+    build_retrieval_plan,
+    classify_question_type,
+)
 
 
 DEFAULT_TOP_K = 4
@@ -33,6 +38,9 @@ ADJACENT_CHUNK_BONUS = 0.10
 MAX_COMPLETE_SCOPE_CHUNKS = 20
 PARAGRAPH_QUERY_COVERAGE_WEIGHT = 0.12
 PARAGRAPH_CONTRAST_BONUS = 0.12
+PARAGRAPH_TIMING_BONUS = 0.16
+PARAGRAPH_CONTENT_BONUS = 0.18
+PARAGRAPH_CONDITION_BONUS = 0.16
 PSEUDO_RELEVANCE_CHUNKS = 4
 MAX_EXPANSION_TERMS = 8
 MIN_EXPANSION_DOCUMENTS = 2
@@ -46,6 +54,9 @@ NORMATIVE_CLAUSE_BONUS = 0.05
 OPERATIVE_CLAUSE_BONUS = 0.15
 PREAMBLE_PENALTY = 0.12
 MIN_SUPPLEMENTAL_QUERY_COVERAGE = 0.60
+QUESTION_TYPE_MATCH_BONUS = 0.10
+REFERENCE_CLAUSE_PENALTY = 0.12
+DEFINITION_CLAUSE_PENALTY = 0.10
 
 COMPARISON_PATTERNS = (
     re.compile(r"\bcompar(?:e|ed|ing|ison)\b", re.IGNORECASE),
@@ -72,6 +83,18 @@ CONTRAST_TERMS = {
     "unless",
     "without",
 }
+TIMING_TEXT_TERMS = {"when", "within", "delay", "hours", "days", "before", "after"}
+CONTENT_TEXT_TERMS = {"contain", "contains", "include", "includes", "information", "details"}
+CONDITION_TEXT_TERMS = {"condition", "conditions", "where", "unless", "if"}
+REFERENCE_CLAUSE = re.compile(
+    r"^\s*(?:\(?\d+[.)]\s*)?(?:paragraphs?|articles?|sections?)\s+\d+"
+    r".*\b(?:refer(?:red)? to|set out in|shall not affect|without prejudice)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+DEFINITION_CLAUSE = re.compile(
+    r"^\s*(?:\(\d+[a-z]?\)\s*)?[‘'\"“].+?[’'\"”]\s+means\b",
+    re.IGNORECASE | re.DOTALL,
+)
 
 KEYWORD_STOP_WORDS = {
     "a",
@@ -153,7 +176,9 @@ def classify_question_scope(
     question: str,
     top_point: str | None,
 ) -> QuestionScope:
-    if is_definition_question(question):
+    plan = build_retrieval_plan(question)
+    question_type = plan.question_type
+    if question_type == QuestionType.DEFINITION:
         return QuestionScope.DEFINITION
 
     normalized = " ".join(question.casefold().split())
@@ -171,7 +196,7 @@ def classify_question_scope(
         return QuestionScope.COMPLETE_LIST
     if top_point is not None:
         return QuestionScope.FOCUSED
-    if is_list_question(question):
+    if plan.requires_complete_list:
         return QuestionScope.COMPLETE_LIST
     return QuestionScope.FOCUSED
 
@@ -366,14 +391,56 @@ def _definition_scores(question: str, documents: list[str]) -> np.ndarray:
     if not subject:
         return scores
 
+    clause_start = r"(?:^|\n)\s*(?:\(\d+[a-z]?\)\s*)?"
+    quoted_or_plain_subject = (
+        rf"(?:[‘'\"“]{re.escape(subject)}[’'\"”]|{re.escape(subject)})"
+    )
     pattern = re.compile(
-        rf"[‘’'\"]?{re.escape(subject)}[‘’'\"]?\s+means\b",
+        rf"{clause_start}{quoted_or_plain_subject}\s+means\b",
         re.IGNORECASE,
     )
     for index, document in enumerate(documents):
         if pattern.search(document):
             scores[index] = 1.0
     return scores
+
+
+def _question_type_adjustment(question: str, document: str) -> float:
+    """Prefer clauses that state the kind of answer requested by the question."""
+    question_type = classify_question_type(question)
+    normalized = document.casefold()
+    if question_type == QuestionType.COMPARISON:
+        comparison_requests_definition = bool(
+            re.search(r"\b(?:define|definition|meaning)\b", question, re.IGNORECASE)
+        )
+        if not comparison_requests_definition and DEFINITION_CLAUSE.search(document):
+            return -DEFINITION_CLAUSE_PENALTY
+        operative_terms = {
+            "shall",
+            "must",
+            "required",
+            "prohibited",
+            "prohibition",
+            "shall not",
+        }
+        return (
+            QUESTION_TYPE_MATCH_BONUS
+            if operative_terms & set(_keyword_tokens(normalized))
+            else 0.0
+        )
+    if question_type in {
+        QuestionType.OBLIGATION,
+        QuestionType.CONTENT,
+        QuestionType.CONDITION,
+    } and REFERENCE_CLAUSE.search(document):
+        return -REFERENCE_CLAUSE_PENALTY
+
+    matching_terms = {
+        QuestionType.OBLIGATION: {"must", "shall", "required", "prohibited"},
+        QuestionType.CONTENT: {"contain", "include", "information", "details"},
+        QuestionType.CONDITION: {"when", "where", "unless", "within", "before", "after"},
+    }.get(question_type, set())
+    return QUESTION_TYPE_MATCH_BONUS if matching_terms & set(_keyword_tokens(normalized)) else 0.0
 
 
 def is_list_question(question: str) -> bool:
@@ -555,6 +622,7 @@ def _paragraph_anchor_index(
     article_anchor = chunks[article_anchor_index]
     query_tokens = set(_query_tokens(question))
     query_contrast = query_tokens & CONTRAST_TERMS
+    question_type = classify_question_type(question)
     paragraph_groups: dict[str, list[int]] = {}
 
     for index, chunk in enumerate(chunks):
@@ -580,6 +648,10 @@ def _paragraph_anchor_index(
                 "\n".join(chunks[index]["content"] for index in indices)
             )
         )
+        has_nested_points = any(
+            chunks[index]["point"] is not None or chunks[index]["subpoint"] is not None
+            for index in indices
+        )
         coverage = (
             len(query_tokens & paragraph_tokens) / len(query_tokens)
             if query_tokens
@@ -590,10 +662,31 @@ def _paragraph_anchor_index(
             if query_contrast and query_contrast <= paragraph_tokens
             else 0.0
         )
+        timing_bonus = (
+            PARAGRAPH_TIMING_BONUS
+            if question_type == QuestionType.CONDITION
+            and paragraph_tokens & TIMING_TEXT_TERMS
+            else 0.0
+        )
+        content_bonus = (
+            PARAGRAPH_CONTENT_BONUS
+            if question_type == QuestionType.CONTENT
+            and (paragraph_tokens & CONTENT_TEXT_TERMS or has_nested_points)
+            else 0.0
+        )
+        condition_bonus = (
+            PARAGRAPH_CONDITION_BONUS
+            if question_type == QuestionType.CONDITION
+            and (paragraph_tokens & CONDITION_TEXT_TERMS or has_nested_points)
+            else 0.0
+        )
         group_score = (
             max(float(ranking_scores[index]) for index in indices)
             + PARAGRAPH_QUERY_COVERAGE_WEIGHT * coverage
             + contrast_bonus
+            + timing_bonus
+            + content_bonus
+            + condition_bonus
         )
         parent_index = max(
             parent_indices,
@@ -962,6 +1055,7 @@ def _comparison_clause_indices(
     maximum_chunks = (
         MAX_COMPARISON_CHUNKS_PER_DOCUMENT
         if is_list_question(question)
+        or classify_question_type(question) == QuestionType.COMPARISON
         else 1
     )
     document_name_tokens = set().union(
@@ -997,6 +1091,7 @@ def _comparison_clause_indices(
     )
     if (
         broad_rule_question
+        and classify_question_type(question) != QuestionType.COMPARISON
         and anchor["paragraph"] not in {None, "1"}
         and anchor["point"] is None
     ):
@@ -1244,6 +1339,10 @@ def retrieve_relevant_chunks(
         + QUERY_EXPANSION_WEIGHT * expansion_scores
         + DEFINITION_MATCH_BONUS * definition_scores
     )
+    base_ranking_scores += np.asarray(
+        [_question_type_adjustment(question, document) for document in searchable_documents],
+        dtype=np.float32,
+    )
     ranked_indices = np.argsort(base_ranking_scores)[::-1]
     best_score = float(base_ranking_scores[ranked_indices[0]])
     if best_score < min_similarity:
@@ -1287,6 +1386,10 @@ def retrieve_relevant_chunks(
         + COMPARISON_KEYWORD_WEIGHT * keyword_scores
         + PHRASE_MATCH_WEIGHT * phrase_scores
         + DEFINITION_MATCH_BONUS * definition_scores
+    )
+    comparison_ranking_scores += np.asarray(
+        [_question_type_adjustment(question, document) for document in searchable_documents],
+        dtype=np.float32,
     )
     comparison_indices = _comparison_indices(
         question,
@@ -1408,8 +1511,10 @@ def retrieve_relevant_chunks(
         ]
 
     accepted_score = max(min_similarity, best_score - max_score_drop)
-    list_question = is_list_question(question)
-    if list_question:
+    plan = build_retrieval_plan(question)
+    list_question = plan.requires_complete_list
+    section_context_question = plan.prefers_section_context
+    if list_question or section_context_question:
         result_limit = top_k
     elif best_score >= HIGH_CONFIDENCE_SCORE:
         result_limit = min(top_k, 2)
@@ -1432,7 +1537,7 @@ def retrieve_relevant_chunks(
                 continue
 
             distance = abs(chunk["chunk_index"] - top_chunk["chunk_index"])
-            if distance == 1 or list_question:
+            if distance == 1 or list_question or section_context_question:
                 ranking_scores[index] += ADJACENT_CHUNK_BONUS / distance
                 related_indices.add(index)
 
@@ -1443,7 +1548,7 @@ def retrieve_relevant_chunks(
             key=lambda index: float(ranking_scores[index]),
             reverse=True,
         )
-        if list_question:
+        if list_question or section_context_question:
             section_indices = sorted(
                 related_indices,
                 key=lambda index: abs(
@@ -1466,7 +1571,10 @@ def retrieve_relevant_chunks(
         if (
             float(base_ranking_scores[index]) < accepted_score
             and len(results) >= min(MIN_RESULT_COUNT, result_limit)
-            and not (list_question and int(index) in related_indices)
+            and not (
+                (list_question or section_context_question)
+                and int(index) in related_indices
+            )
         ):
             break
 
