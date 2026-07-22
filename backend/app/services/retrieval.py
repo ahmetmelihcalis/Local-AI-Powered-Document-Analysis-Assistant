@@ -35,6 +35,7 @@ HIGH_CONFIDENCE_SCORE = 0.50
 MEDIUM_CONFIDENCE_SCORE = 0.35
 MIN_RESULT_COUNT = 2
 ADJACENT_CHUNK_BONUS = 0.10
+UNSECTIONED_CONTEXT_WINDOW = 2
 MAX_COMPLETE_SCOPE_CHUNKS = 20
 PARAGRAPH_QUERY_COVERAGE_WEIGHT = 0.12
 PARAGRAPH_CONTRAST_BONUS = 0.12
@@ -90,6 +91,11 @@ REFERENCE_CLAUSE = re.compile(
     r"^\s*(?:\(?\d+[.)]\s*)?(?:paragraphs?|articles?|sections?)\s+\d+"
     r".*\b(?:refer(?:red)? to|set out in|shall not affect|without prejudice)\b",
     re.IGNORECASE | re.DOTALL,
+)
+INDIRECT_REFERENCE_CLAUSE = re.compile(
+    r"\b(?:referred to|set out)\s+in\s+"
+    r"(?:this\s+)?(?:paragraph|point|article|section|chapter)s?\b",
+    re.IGNORECASE,
 )
 DEFINITION_CLAUSE = re.compile(
     r"^\s*(?:\(\d+[a-z]?\)\s*)?[‘'\"“].+?[’'\"”]\s+means\b",
@@ -432,7 +438,7 @@ def _question_type_adjustment(question: str, document: str) -> float:
         QuestionType.OBLIGATION,
         QuestionType.CONTENT,
         QuestionType.CONDITION,
-    } and REFERENCE_CLAUSE.search(document):
+    } and (REFERENCE_CLAUSE.search(document) or INDIRECT_REFERENCE_CLAUSE.search(document)):
         return -REFERENCE_CLAUSE_PENALTY
 
     matching_terms = {
@@ -563,6 +569,7 @@ def _focused_clause_indices(
     chunks: list[dict],
     anchor_index: int,
 ) -> list[int]:
+    """Expand a legal clause with the hierarchy needed to read it correctly."""
     anchor = chunks[anchor_index]
     hierarchy = (
         anchor["document_id"],
@@ -587,8 +594,27 @@ def _focused_clause_indices(
         == hierarchy
     ]
 
+    parent_indices = [
+        index
+        for index, chunk in enumerate(chunks)
+        if chunk["document_id"] == anchor["document_id"]
+        and chunk["article"] == anchor["article"]
+        and chunk["paragraph"] == anchor["paragraph"]
+        and chunk["point"] is None
+        and chunk["subpoint"] is None
+    ]
+
     if anchor["subpoint"] is not None:
-        return selected_indices
+        point_indices = [
+            index
+            for index, chunk in enumerate(chunks)
+            if chunk["document_id"] == anchor["document_id"]
+            and chunk["article"] == anchor["article"]
+            and chunk["paragraph"] == anchor["paragraph"]
+            and chunk["point"] == anchor["point"]
+            and chunk["subpoint"] is None
+        ]
+        return list(dict.fromkeys([*parent_indices, *point_indices, *selected_indices]))
 
     if anchor["point"] is not None:
         descendants = [
@@ -610,7 +636,7 @@ def _focused_clause_indices(
             and chunk["point"] is not None
         ]
 
-    return list(dict.fromkeys([*selected_indices, *descendants]))
+    return list(dict.fromkeys([*parent_indices, *selected_indices, *descendants]))
 
 
 def _paragraph_anchor_index(
@@ -1052,10 +1078,10 @@ def _comparison_clause_indices(
     ranking_scores: np.ndarray,
 ) -> list[int]:
     anchor = chunks[anchor_index]
+    plan = build_retrieval_plan(question)
     maximum_chunks = (
         MAX_COMPARISON_CHUNKS_PER_DOCUMENT
-        if is_list_question(question)
-        or classify_question_type(question) == QuestionType.COMPARISON
+        if plan.requires_complete_list or plan.requires_balanced_sources
         else 1
     )
     document_name_tokens = set().union(
@@ -1091,7 +1117,7 @@ def _comparison_clause_indices(
     )
     if (
         broad_rule_question
-        and classify_question_type(question) != QuestionType.COMPARISON
+        and not plan.requires_balanced_sources
         and anchor["paragraph"] not in {None, "1"}
         and anchor["point"] is None
     ):
@@ -1153,7 +1179,14 @@ def _comparison_clause_indices(
         selected_indices.extend(_focused_clause_indices(chunks, index))
         selected_articles.add(article)
 
-    return list(dict.fromkeys(selected_indices))
+    selected_indices = list(dict.fromkeys(selected_indices))
+    return sorted(
+        selected_indices,
+        key=lambda index: (
+            chunks[index]["document_id"],
+            chunks[index].get("chunk_index", index),
+        ),
+    )
 
 
 def _comparison_indices(
@@ -1345,9 +1378,6 @@ def retrieve_relevant_chunks(
     )
     ranked_indices = np.argsort(base_ranking_scores)[::-1]
     best_score = float(base_ranking_scores[ranked_indices[0]])
-    if best_score < min_similarity:
-        return []
-
     original_top_index = int(ranked_indices[0])
     explicit_query_anchor = _explicit_query_anchor(
         question,
@@ -1366,6 +1396,8 @@ def retrieve_relevant_chunks(
         and _query_coverage(question, lexical_document)
         >= LEXICAL_ANCHOR_MIN_COVERAGE
     )
+    if best_score < min_similarity and not strong_lexical_anchor:
+        return []
     if explicit_query_anchor is not None:
         original_top_index = explicit_query_anchor
     elif strong_lexical_anchor:
@@ -1375,6 +1407,8 @@ def retrieve_relevant_chunks(
     if (
         explicit_query_anchor is None
         and not strong_lexical_anchor
+        and _question_type_adjustment(question, searchable_documents[semantic_top_index])
+        >= 0
         and float(similarities[semantic_top_index])
         - float(similarities[original_top_index])
         >= SEMANTIC_OVERRIDE_MARGIN
@@ -1423,7 +1457,7 @@ def retrieve_relevant_chunks(
         top_document,
         float(similarities[original_top_index]),
         float(definition_scores[original_top_index]),
-    ):
+    ) and not strong_lexical_anchor:
         return []
 
     if reference_target_index is not None:
@@ -1510,7 +1544,24 @@ def retrieve_relevant_chunks(
             for index in selected_indices
         ]
 
-    accepted_score = max(min_similarity, best_score - max_score_drop)
+    if strong_lexical_anchor:
+        ranked_indices = np.asarray(
+            [
+                original_top_index,
+                *(
+                    int(index)
+                    for index in ranked_indices
+                    if int(index) != original_top_index
+                    and chunks[int(index)]["document_id"]
+                    == chunks[original_top_index]["document_id"]
+                ),
+            ],
+            dtype=int,
+        )
+    accepted_score = max(
+        min_similarity,
+        float(base_ranking_scores[original_top_index]) - max_score_drop,
+    )
     plan = build_retrieval_plan(question)
     list_question = plan.requires_complete_list
     section_context_question = plan.prefers_section_context
@@ -1527,17 +1578,25 @@ def retrieve_relevant_chunks(
     top_index = int(ranked_indices[0])
     top_chunk = chunks[top_index]
     related_indices: set[int] = set()
-    if top_chunk["section"]:
+    if top_chunk["section"] or section_context_question:
         for index, chunk in enumerate(chunks):
             if (
                 index == top_index
                 or chunk["document_id"] != top_chunk["document_id"]
-                or chunk["section"] != top_chunk["section"]
             ):
                 continue
 
             distance = abs(chunk["chunk_index"] - top_chunk["chunk_index"])
-            if distance == 1 or list_question or section_context_question:
+            same_section = top_chunk["section"] and chunk["section"] == top_chunk["section"]
+            nearby_unsectioned_context = (
+                top_chunk["section"] is None
+                and section_context_question
+                and distance <= UNSECTIONED_CONTEXT_WINDOW
+            )
+            if same_section and (distance == 1 or list_question or section_context_question):
+                ranking_scores[index] += ADJACENT_CHUNK_BONUS / distance
+                related_indices.add(index)
+            elif nearby_unsectioned_context:
                 ranking_scores[index] += ADJACENT_CHUNK_BONUS / distance
                 related_indices.add(index)
 
@@ -1550,16 +1609,14 @@ def retrieve_relevant_chunks(
         )
         if list_question or section_context_question:
             section_indices = sorted(
-                related_indices,
-                key=lambda index: abs(
-                    chunks[index]["chunk_index"] - top_chunk["chunk_index"]
-                ),
+                {top_index, *related_indices},
+                key=lambda index: chunks[index]["chunk_index"],
             )
             remaining_indices = [
-                index for index in remaining_indices if index not in related_indices
+                index for index in remaining_indices if index not in section_indices
             ]
             ranked_indices = np.asarray(
-                [top_index, *section_indices, *remaining_indices],
+                [*section_indices, *remaining_indices],
                 dtype=int,
             )
         else:

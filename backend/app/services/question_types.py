@@ -64,6 +64,8 @@ def classify_question_type(question: str) -> QuestionType:
         return QuestionType.SUMMARY
     if any(pattern.search(normalized) for pattern in PROCEDURE_PATTERNS):
         return QuestionType.PROCEDURE
+    if re.match(r"^what is .+ about$", normalized):
+        return QuestionType.SUMMARY
     if normalized.startswith("what is "):
         return QuestionType.DEFINITION
     if any(pattern.search(normalized) for pattern in CONTENT_PATTERNS):
