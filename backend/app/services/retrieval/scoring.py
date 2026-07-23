@@ -18,6 +18,16 @@ MAX_EXPANSION_TERMS = 8
 QUESTION_TYPE_MATCH_BONUS = 0.10
 REFERENCE_CLAUSE_PENALTY = 0.12
 DEFINITION_CLAUSE_PENALTY = 0.10
+CONDITION_CLAUSE_BONUS = 0.40
+DIRECT_CONDITION_OBLIGATION_BONUS = 0.20
+ENFORCEMENT_CLAUSE_PENALTY = 0.40
+GUIDANCE_CLAUSE_PENALTY = 0.30
+DATA_SUBJECT_COMMUNICATION_BONUS = 0.28
+SUPERVISORY_NOTIFICATION_PENALTY = 0.20
+EXPLICIT_TIMEFRAME_BONUS = 0.42
+MISSING_TIMEFRAME_PENALTY = 0.12
+ACTOR_ACTION_TARGET_BONUS = 0.55
+REVERSED_ACTOR_ACTION_TARGET_PENALTY = 0.50
 
 KEYWORD_STOP_WORDS = {
     "a", "an", "and", "are", "does", "for", "how", "in", "is", "of", "on",
@@ -152,7 +162,66 @@ def question_type_adjustment(question: str, document: str) -> float:
         QuestionType.CONTENT: {"contain", "include", "information", "details"},
         QuestionType.CONDITION: {"when", "where", "unless", "within", "before", "after"},
     }.get(question_type, set())
-    return QUESTION_TYPE_MATCH_BONUS if matching_terms & tokens else 0.0
+    adjustment = QUESTION_TYPE_MATCH_BONUS if matching_terms & tokens else 0.0
+    if question_type == QuestionType.CONDITION:
+        condition_signals = tokens & {
+            "unless",
+            "likely",
+            "where",
+            "within",
+            "delay",
+            "deadline",
+        }
+        if condition_signals:
+            adjustment += CONDITION_CLAUSE_BONUS
+            if tokens & {"shall", "must", "required"}:
+                adjustment += DIRECT_CONDITION_OBLIGATION_BONUS
+        if {"corrective", "powers"} <= tokens:
+            adjustment -= ENFORCEMENT_CLAUSE_PENALTY
+        if {"codes", "conduct"} <= tokens:
+            adjustment -= GUIDANCE_CLAUSE_PENALTY
+        question_tokens = set(keyword_tokens(question))
+        asks_about_affected_persons = bool(
+            question_tokens & {"person", "people", "individual", "subject", "user"}
+        )
+        asks_to_inform = bool(
+            question_tokens & {"tell", "inform", "communicate"}
+        )
+        if asks_about_affected_persons and asks_to_inform:
+            if {"data", "subject", "communicate"} <= tokens:
+                adjustment += DATA_SUBJECT_COMMUNICATION_BONUS
+            if {"supervisory", "authority", "notify"} <= tokens:
+                adjustment -= SUPERVISORY_NOTIFICATION_PENALTY
+        if "deadline" in question_tokens:
+            has_explicit_timeframe = bool(tokens & {"hour", "hours", "day", "days"})
+            has_explicit_timeframe = has_explicit_timeframe or "not later" in document.casefold()
+            has_explicit_timeframe = has_explicit_timeframe or "within" in tokens
+            adjustment += (
+                EXPLICIT_TIMEFRAME_BONUS
+                if has_explicit_timeframe
+                else -MISSING_TIMEFRAME_PENALTY
+            )
+        asks_controller_to_notify_supervisory_authority = all(
+            term in question_tokens
+            for term in {"controller", "notify", "supervisory", "authority"}
+        )
+        if asks_controller_to_notify_supervisory_authority:
+            normalized_document = " ".join(document.casefold().split())
+            direct_relationship = re.search(
+                r"\bcontroller\b.{0,180}\bnotif(?:y|ies|ied|ication)\b.{0,180}"
+                r"\bsupervisory\s+authority\b",
+                normalized_document,
+            )
+            reversed_relationship = re.search(
+                r"\bsupervisory\s+authority\b.{0,180}\bnotif(?:y|ies|ied|ication)\b"
+                r".{0,180}\bcontroller\b",
+                normalized_document,
+            )
+            if direct_relationship:
+                adjustment += ACTOR_ACTION_TARGET_BONUS
+            elif reversed_relationship:
+                adjustment -= REVERSED_ACTOR_ACTION_TARGET_PENALTY
+    return adjustment
 
 
 def bm25_scores(question: str, documents: list[str]) -> np.ndarray:

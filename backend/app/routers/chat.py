@@ -1,3 +1,4 @@
+import logging
 from time import perf_counter
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
@@ -7,6 +8,7 @@ from app.services.rag_service import answer_question
 
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+logger = logging.getLogger(__name__)
 
 
 class ChatRequest(BaseModel):
@@ -39,6 +41,7 @@ class ChatResponse(BaseModel):
     sources: list[SourceResponse]
     retrievalCount: int
     durationMs: int
+    timings: dict[str, int]
 
 
 def _create_excerpt(content: str, max_length: int = 320) -> str:
@@ -63,6 +66,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
             detail=str(error),
         ) from error
     except Exception as error:
+        logger.exception("Local RAG answer generation failed")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="The local AI service is currently unavailable.",
@@ -88,4 +92,5 @@ async def chat(request: ChatRequest) -> ChatResponse:
         ],
         retrievalCount=result.retrieval_count,
         durationMs=duration_ms,
+        timings=result.timings,
     )

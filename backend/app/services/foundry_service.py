@@ -1,20 +1,24 @@
 from importlib.util import find_spec
 from pathlib import Path
+from collections import OrderedDict
 from threading import Lock, Timer
 
+from foundry_local_sdk.exception import FoundryLocalException
 from foundry_local_sdk import Configuration, FoundryLocalManager
 
 
 CHAT_MODEL = "phi-4-mini"
 EMBEDDING_MODEL = "qwen3-embedding-0.6b"
 EMBEDDING_BATCH_SIZE = 16
-MODEL_IDLE_TIMEOUT_SECONDS = 5 * 60
+MODEL_IDLE_TIMEOUT_SECONDS = 15 * 60
+QUERY_EMBEDDING_CACHE_SIZE = 128
 
 _manager = None
 _models = {}
 _lock = Lock()
 _idle_timer: Timer | None = None
 _idle_generation = 0
+_embedding_cache: OrderedDict[str, list[float]] = OrderedDict()
 
 
 def foundry_status() -> str:
@@ -103,18 +107,25 @@ def generate_chat(
 
         try:
             model = _get_model(CHAT_MODEL)
-            model.download()
-            if not model.is_loaded:
-                model.load()
+            for attempt in range(2):
+                try:
+                    model.download()
+                    if not model.is_loaded:
+                        model.load()
 
-            client = model.get_chat_client()
-            client.settings.max_tokens = max_tokens
-            client.settings.temperature = 0.1
-            client.settings.top_p = 0.9
-            client.settings.frequency_penalty = 0.8
-            client.settings.random_seed = 42
-            response = client.complete_chat(messages)
-            return response.choices[0].message.content.strip()
+                    client = model.get_chat_client()
+                    client.settings.max_tokens = max_tokens
+                    client.settings.temperature = 0.1
+                    client.settings.top_p = 0.9
+                    client.settings.frequency_penalty = 0.8
+                    client.settings.random_seed = 42
+                    response = client.complete_chat(messages)
+                    return response.choices[0].message.content.strip()
+                except FoundryLocalException:
+                    if attempt:
+                        raise
+                    if model.is_loaded:
+                        model.unload()
         finally:
             _schedule_idle_unload()
 
@@ -128,22 +139,55 @@ def create_embeddings(texts: list[str]) -> list[list[float]]:
 
         try:
             model = _get_model(EMBEDDING_MODEL)
-            model.download()
-            if not model.is_loaded:
-                model.load()
+            embeddings: list[list[float] | None] = []
+            for text in texts:
+                embedding = _embedding_cache.get(text)
+                if embedding is not None:
+                    _embedding_cache.move_to_end(text)
+                embeddings.append(embedding)
+            missing_indices = [
+                index for index, embedding in enumerate(embeddings)
+                if embedding is None
+            ]
 
-            client = model.get_embedding_client()
-            embeddings: list[list[float]] = []
+            for attempt in range(2):
+                try:
+                    model.download()
+                    if not model.is_loaded:
+                        model.load()
 
-            for start in range(0, len(texts), EMBEDDING_BATCH_SIZE):
-                response = client.generate_embeddings(
-                    texts[start : start + EMBEDDING_BATCH_SIZE]
-                )
-                embeddings.extend(item.embedding for item in response.data)
+                    client = model.get_embedding_client()
+                    for start in range(0, len(missing_indices), EMBEDDING_BATCH_SIZE):
+                        indices = missing_indices[start : start + EMBEDDING_BATCH_SIZE]
+                        response = client.generate_embeddings(
+                            [texts[index] for index in indices]
+                        )
+                        for index, item in zip(indices, response.data, strict=True):
+                            embedding = item.embedding
+                            _embedding_cache[texts[index]] = embedding
+                            _embedding_cache.move_to_end(texts[index])
+                            while len(_embedding_cache) > QUERY_EMBEDDING_CACHE_SIZE:
+                                _embedding_cache.popitem(last=False)
+                            embeddings[index] = embedding
+                    break
+                except FoundryLocalException:
+                    if attempt:
+                        raise
+                    if model.is_loaded:
+                        model.unload()
 
-            return embeddings
+            if any(embedding is None for embedding in embeddings):
+                raise RuntimeError("Embedding generation did not return every requested vector.")
+            return [embedding for embedding in embeddings if embedding is not None]
         finally:
             _schedule_idle_unload()
+
+
+def warm_up_embedding_model() -> None:
+    try:
+        create_embeddings(["local rag embedding warm up"])
+    except Exception:
+        return
 
 
 def get_embedding_tokenizer_path() -> Path:

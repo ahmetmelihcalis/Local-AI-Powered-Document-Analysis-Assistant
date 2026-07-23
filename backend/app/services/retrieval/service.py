@@ -3,6 +3,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 
@@ -182,7 +183,7 @@ def _referenced_clause_target_index(
         reverse=True,
     )
     for (article_number, paragraph), (coverage, frequency) in ranked_references:
-        if coverage < MIN_QUERY_COVERAGE or frequency < 2 or not paragraph:
+        if coverage < scoring.MIN_QUERY_COVERAGE or frequency < 2 or not paragraph:
             continue
 
         candidates = [
@@ -539,6 +540,7 @@ def retrieve_relevant_chunks(
     max_score_drop: float = MAX_SCORE_DROP,
     database_path: Path = DATABASE_PATH,
     embedding_function: Callable[[list[str]], list[list[float]]] = create_embeddings,
+    timings: dict[str, int] | None = None,
 ) -> list[RetrievedChunk]:
     question = question.strip()
 
@@ -553,11 +555,15 @@ def retrieve_relevant_chunks(
     if max_score_drop < 0:
         raise ValueError("Maximum score drop cannot be negative.")
 
+    retrieval_started_at = perf_counter()
     chunks = get_chunks(database_path=database_path)
     if not chunks:
         return []
 
+    embedding_started_at = perf_counter()
     response = embedding_function([question])
+    if timings is not None:
+        timings["embeddingMs"] = round((perf_counter() - embedding_started_at) * 1000)
     if len(response) != 1:
         raise RuntimeError("The embedding model returned an unexpected result count.")
 
@@ -816,7 +822,7 @@ def retrieve_relevant_chunks(
     plan = build_retrieval_plan(question)
     list_question = plan.requires_complete_list
     section_context_question = plan.prefers_section_context
-    if list_question or section_context_question:
+    if list_question or section_context_question or plan.requires_broader_context:
         result_limit = top_k
     elif best_score >= HIGH_CONFIDENCE_SCORE:
         result_limit = min(top_k, 2)
@@ -906,4 +912,8 @@ def retrieve_relevant_chunks(
         if len(results) == result_limit:
             break
 
+    if timings is not None:
+        timings["retrievalPlanningMs"] = round(
+            (perf_counter() - retrieval_started_at) * 1000
+        )
     return results

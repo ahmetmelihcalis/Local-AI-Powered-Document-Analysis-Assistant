@@ -54,14 +54,55 @@ QUESTION_REPLACEMENTS = {
     "dont": "do not",
     "notifcation": "notification",
     "pls": "please",
+    "theres": "there is",
     "u": "you",
 }
 
 QUESTION_EXPANSIONS = {
     "banned": ("prohibited", "prohibition"),
+    "breach": ("personal data breach",),
+    "deadline": ("within", "not later", "delay"),
     "person": ("individual", "data subject"),
+    "report": ("notify", "notification"),
+    "reporting": ("notify", "notification"),
     "tell": ("notify", "communicate", "inform"),
     "users": ("persons", "individuals", "data subjects"),
+}
+
+DETAIL_CONTEXT_TERMS = {
+    "advantages",
+    "analytics",
+    "architecture",
+    "components",
+    "configuration",
+    "deployment",
+    "disadvantages",
+    "features",
+    "implementation",
+    "limitations",
+    "methods",
+    "requirements",
+    "steps",
+    "technologies",
+    "workflow",
+}
+
+PROHIBITION_SUBJECT_STOP_WORDS = {
+    "are",
+    "banned",
+    "can",
+    "do",
+    "is",
+    "me",
+    "practices",
+    "prohibited",
+    "systems",
+    "tell",
+    "the",
+    "use",
+    "uses",
+    "what",
+    "which",
 }
 
 
@@ -71,6 +112,7 @@ class RetrievalPlan:
     requires_complete_list: bool = False
     prefers_section_context: bool = False
     requires_balanced_sources: bool = False
+    requires_broader_context: bool = False
 
 
 def normalize_question(question: str) -> str:
@@ -119,18 +161,39 @@ def classify_question_type(question: str) -> QuestionType:
     return QuestionType.GENERAL
 
 
+def requires_broader_context(question: str) -> bool:
+    normalized = normalize_question(question)
+    tokens = set(re.findall(r"[^\W_]+", normalized, flags=re.UNICODE))
+    detail_terms = tokens & DETAIL_CONTEXT_TERMS
+    has_multiple_aspects = " and " in normalized and len(tokens) >= 8
+    return len(detail_terms) >= 2 or (bool(detail_terms) and has_multiple_aspects)
+
+
 def build_retrieval_plan(question: str) -> RetrievalPlan:
     question_type = classify_question_type(question)
+    broader_context = requires_broader_context(question)
     if question_type == QuestionType.COMPARISON:
-        return RetrievalPlan(question_type, requires_balanced_sources=True)
+        return RetrievalPlan(
+            question_type,
+            requires_balanced_sources=True,
+        )
     if question_type in {QuestionType.LIST, QuestionType.CONTENT}:
         return RetrievalPlan(question_type, requires_complete_list=True)
     normalized = normalize_question(question)
-    if (
-        ("banned" in normalized or "prohibited" in normalized)
-        and re.search(r"\b(?:practices|systems|activities|uses)\b", normalized)
+    if ("banned" in normalized or "prohibited" in normalized) and re.search(
+        r"\b(?:practices|systems|activities|uses)\b", normalized
     ):
-        return RetrievalPlan(question_type, requires_complete_list=True)
+        subject_terms = {
+            token
+            for token in re.findall(r"[^\W_]+", normalized, flags=re.UNICODE)
+            if token not in PROHIBITION_SUBJECT_STOP_WORDS
+        }
+        if subject_terms <= {"ai", "system"}:
+            return RetrievalPlan(question_type, requires_complete_list=True)
     if question_type in {QuestionType.PROCEDURE, QuestionType.SUMMARY}:
-        return RetrievalPlan(question_type, prefers_section_context=True)
-    return RetrievalPlan(question_type)
+        return RetrievalPlan(
+            question_type,
+            prefers_section_context=True,
+            requires_broader_context=broader_context,
+        )
+    return RetrievalPlan(question_type, requires_broader_context=broader_context)

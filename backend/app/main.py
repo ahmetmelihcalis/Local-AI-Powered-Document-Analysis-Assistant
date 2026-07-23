@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from threading import Thread
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +15,7 @@ from app.services.foundry_service import (
     foundry_status,
     test_chat,
     unload_models,
+    warm_up_embedding_model,
 )
 
 
@@ -24,6 +26,7 @@ class TestChatRequest(BaseModel):
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     initialize_database()
+    Thread(target=warm_up_embedding_model, daemon=True).start()
     try:
         yield
     finally:
