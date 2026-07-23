@@ -17,7 +17,7 @@ from app.services.retrieval import (
     mentions_multiple_documents,
     retrieve_relevant_chunks,
 )
-from app.services.question_types import QuestionType, classify_question_type
+from app.services.retrieval.questions import QuestionType, classify_question_type
 
 
 INSUFFICIENT_ANSWER = (
@@ -363,7 +363,12 @@ def _validation_issues(
     lowered = answer.casefold()
     if not answer:
         issues.append("empty answer")
-    if "using only the supplied" in lowered or "required labels:" in lowered:
+    if (
+        "using only the supplied" in lowered
+        or "required labels:" in lowered
+        or lowered.startswith("context:")
+        or "\nquestion:" in lowered
+    ):
         issues.append("prompt leak")
     if _has_repetition(answer):
         issues.append("repeated text")

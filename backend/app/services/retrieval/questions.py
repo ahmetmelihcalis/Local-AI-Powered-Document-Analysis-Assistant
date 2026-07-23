@@ -33,6 +33,7 @@ CONDITION_PATTERNS = (
     re.compile(r"\b(?:within|before|after|deadline|delay)\b", re.IGNORECASE),
     re.compile(r"\b(?:under what conditions|in what circumstances)\b", re.IGNORECASE),
     re.compile(r"\bwhen (?:can|is)\b", re.IGNORECASE),
+    re.compile(r"\bwhat happens if\b", re.IGNORECASE),
 )
 OBLIGATION_PATTERNS = (
     re.compile(r"\b(?:must|shall|should|required|prohibited)\b", re.IGNORECASE),
@@ -47,6 +48,22 @@ SUMMARY_PATTERNS = (
     re.compile(r"\b(?:summari[sz]e|overview|main points?)\b", re.IGNORECASE),
 )
 
+QUESTION_REPLACEMENTS = {
+    "banned": "prohibited",
+    "cant": "cannot",
+    "dont": "do not",
+    "notifcation": "notification",
+    "pls": "please",
+    "u": "you",
+}
+
+QUESTION_EXPANSIONS = {
+    "banned": ("prohibited", "prohibition"),
+    "person": ("individual", "data subject"),
+    "tell": ("notify", "communicate", "inform"),
+    "users": ("persons", "individuals", "data subjects"),
+}
+
 
 @dataclass(frozen=True)
 class RetrievalPlan:
@@ -56,8 +73,29 @@ class RetrievalPlan:
     requires_balanced_sources: bool = False
 
 
+def normalize_question(question: str) -> str:
+    normalized = " ".join(question.casefold().strip(" ?.!\t\n").split())
+    normalized = re.sub(
+        r"\b(?:talking|speaking)\s+to\s+(?:an?\s+)?ai\b",
+        "interacting with an ai system",
+        normalized,
+    )
+    tokens = re.findall(r"[^\W_]+|[^\w\s]", normalized, flags=re.UNICODE)
+    return " ".join(QUESTION_REPLACEMENTS.get(token, token) for token in tokens)
+
+
+def enrich_question(question: str) -> str:
+    normalized = normalize_question(question)
+    expansions = [
+        term
+        for token in re.findall(r"[^\W_]+", normalized, flags=re.UNICODE)
+        for term in QUESTION_EXPANSIONS.get(token, ())
+    ]
+    return " ".join((normalized, *dict.fromkeys(expansions)))
+
+
 def classify_question_type(question: str) -> QuestionType:
-    normalized = " ".join(question.casefold().strip(" ?.!").split())
+    normalized = normalize_question(question)
     if any(pattern.search(normalized) for pattern in COMPARISON_PATTERNS):
         return QuestionType.COMPARISON
     if any(pattern.search(normalized) for pattern in SUMMARY_PATTERNS):
@@ -85,7 +123,13 @@ def build_retrieval_plan(question: str) -> RetrievalPlan:
     question_type = classify_question_type(question)
     if question_type == QuestionType.COMPARISON:
         return RetrievalPlan(question_type, requires_balanced_sources=True)
-    if question_type == QuestionType.LIST:
+    if question_type in {QuestionType.LIST, QuestionType.CONTENT}:
+        return RetrievalPlan(question_type, requires_complete_list=True)
+    normalized = normalize_question(question)
+    if (
+        ("banned" in normalized or "prohibited" in normalized)
+        and re.search(r"\b(?:practices|systems|activities|uses)\b", normalized)
+    ):
         return RetrievalPlan(question_type, requires_complete_list=True)
     if question_type in {QuestionType.PROCEDURE, QuestionType.SUMMARY}:
         return RetrievalPlan(question_type, prefers_section_context=True)
