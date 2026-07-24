@@ -21,6 +21,14 @@ type ChatMessage = {
   durationMs?: number;
 };
 
+const LEGAL_EXAMPLE_QUESTIONS = [
+  "What is an AI system?",
+  "What information must a personal data breach notification contain?",
+  "When must a personal data breach be communicated to the data subject?",
+];
+
+const GENERAL_EXAMPLE_QUESTION = "What is this document about?";
+
 function legalReference(source: ChatSource): string | null {
   if (!source.article) {
     return null;
@@ -149,9 +157,8 @@ export default function App() {
     }
   }
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const trimmedQuestion = question.trim();
+  async function askQuestion(questionToAsk: string) {
+    const trimmedQuestion = questionToAsk.trim();
 
     if (!trimmedQuestion || isSending || status !== "ready") {
       return;
@@ -190,12 +197,19 @@ export default function App() {
     }
   }
 
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void askQuestion(question);
+  }
+
   return (
     <div className={styles.appShell}>
       <header className={styles.header}>
-        <div>
-          <h1>Local RAG Assistant</h1>
-        </div>
+        <a className={styles.headerBrand} href="/" aria-label="Go to home">
+          <span>Local AI-Powered</span>
+          <h1>Document Analysis Assistant</h1>
+          <p>Optimized for EU AI Act and GDPR documents</p>
+        </a>
 
         <div className={styles.headerActions}>
           {(status !== "ready" || !foundryAvailable) && (
@@ -239,6 +253,8 @@ export default function App() {
             <p className={styles.dropHint}>Drop a document here or choose a file</p>
             <input
               ref={fileInputRef}
+              className={styles.fileInput}
+              id="document-file"
               type="file"
               accept=".txt,.md,.pdf,.docx"
               aria-label="Choose a document"
@@ -247,6 +263,14 @@ export default function App() {
               }
               disabled={isUploading}
             />
+            <div className={styles.fileSelector}>
+              <label className={styles.fileSelectButton} htmlFor="document-file">
+                Choose file
+              </label>
+              <span className={styles.fileName} title={selectedFile?.name}>
+                {selectedFile?.name ?? "No file chosen"}
+              </span>
+            </div>
             <button
               type="submit"
               disabled={
@@ -289,13 +313,22 @@ export default function App() {
                       onClick={() => handleDocumentDelete(document.id)}
                       disabled={deletingDocumentId !== null}
                       aria-label={`Delete ${document.originalName}`}
+                      title={`Delete ${document.originalName}`}
                     >
-                      {deletingDocumentId === document.id ? "Deleting…" : "Delete"}
+                      {deletingDocumentId === document.id ? (
+                        "…"
+                      ) : (
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="M4 7h16M10 11v6M14 11v6M9 7l1-2h4l1 2M6 7l1 13h10l1-13" />
+                        </svg>
+                      )}
                     </button>
                   </div>
                   <small className={styles.documentDetails}>
-                    {document.fileType.toUpperCase()} · {document.chunkCount} chunks ·{" "}
-                    {document.status}
+                    <span>
+                      {document.fileType.toUpperCase()} · {document.chunkCount} chunks
+                    </span>
+                    <span data-status={document.status}>{document.status}</span>
                   </small>
                 </li>
               ))}
@@ -307,12 +340,38 @@ export default function App() {
           <section className={styles.messages} aria-live="polite">
           {messages.length === 0 && (
             <div className={styles.emptyState}>
-              <div className={styles.emptyIcon} aria-hidden="true">AI</div>
-              <h2>Ask questions about your documents</h2>
+              <h2>Ask Questions About Your Documents</h2>
               <p>
-                Answers are based only on information found in your uploaded
-                documents and include the sources used.
+                Answers are grounded in your uploaded documents. Supporting
+                sources are shown when available.
               </p>
+              <div className={styles.exampleQuestions}>
+                <span>Try a legal example</span>
+                <div>
+                  {LEGAL_EXAMPLE_QUESTIONS.map((example) => (
+                    <button
+                      key={example}
+                      type="button"
+                      onClick={() => void askQuestion(example)}
+                      disabled={status !== "ready" || !foundryAvailable}
+                    >
+                      {example}
+                    </button>
+                  ))}
+                </div>
+                <span className={styles.generalExampleLabel}>
+                  Or ask about any uploaded document
+                </span>
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => void askQuestion(GENERAL_EXAMPLE_QUESTION)}
+                    disabled={status !== "ready" || !foundryAvailable}
+                  >
+                    {GENERAL_EXAMPLE_QUESTION}
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 
@@ -342,7 +401,9 @@ export default function App() {
                         >
                           <div className={styles.sourceHeader}>
                             <strong>{source.fileName}</strong>
-                            <span>{Math.round(source.score * 100)}% similarity</span>
+                            <span>
+                              Source relevance: {Math.round(source.score * 100)}%
+                            </span>
                           </div>
                           {(source.page !== null || source.section || clause) && (
                             <small>
@@ -401,9 +462,11 @@ export default function App() {
               {isSending ? "Answering" : "Send"}
             </button>
           </form>
-          <p className={styles.disclaimer}>
-            The local model answers only from the selected document passages.
-          </p>
+          {messages.length > 0 && (
+            <p className={styles.disclaimer}>
+              The local model answers only from the selected document passages.
+            </p>
+          )}
           </div>
         </section>
       </main>
