@@ -21,6 +21,16 @@ AI_INTERACTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 PROJECT_SUMMARY_PATTERN = re.compile(r"^what is .+ about$", re.IGNORECASE)
+GENERAL_DOCUMENT_PATTERN = re.compile(
+    r"\b(?:this|the)\s+(?:project|application|app|dashboard)\b"
+    r"|\bproject\s+(?:prerequisites|requirements|setup)\b",
+    re.IGNORECASE,
+)
+BROAD_CONDITION_PATTERN = re.compile(
+    r"\bwhen\s+(?:may|can|does|do)\b|\b(?:can|may)\s+\w+|"
+    r"^\s*(?:an?\s+)?ai(?:\s+system)?\s+(?:make|making)\s+decisions?\b",
+    re.IGNORECASE,
+)
 BROAD_PROHIBITION_PATTERN = re.compile(
     r"\b(?:practices|systems|activities|uses)\b",
     re.IGNORECASE,
@@ -39,6 +49,11 @@ CONTENT_PATTERNS = (
 )
 CONDITION_PATTERNS = (
     re.compile(r"\bwhen\b", re.IGNORECASE),
+    re.compile(r"^\s*(?:can|may)\b", re.IGNORECASE),
+    re.compile(
+        r"^\s*(?:an?\s+)?ai(?:\s+system)?\s+(?:make|making)\s+decisions?\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\b(?:within|before|after|deadline|delay)\b", re.IGNORECASE),
     re.compile(r"\b(?:under what conditions|in what circumstances)\b", re.IGNORECASE),
     re.compile(r"\bwhen (?:can|is)\b", re.IGNORECASE),
@@ -119,6 +134,8 @@ class RetrievalPlan:
     prefers_section_context: bool = False
     requires_balanced_sources: bool = False
     requires_broader_context: bool = False
+    requires_governing_context: bool = False
+    prefers_general_documents: bool = False
 
 
 def normalize_question(question: str) -> str:
@@ -174,24 +191,44 @@ def requires_broader_context(question: str) -> bool:
 
 def build_retrieval_plan(question: str) -> RetrievalPlan:
     question_type = classify_question_type(question)
+    normalized = normalize_question(question)
+    prefers_general_documents = GENERAL_DOCUMENT_PATTERN.search(normalized) is not None
     if question_type == QuestionType.COMPARISON:
-        return RetrievalPlan(question_type, requires_balanced_sources=True)
+        return RetrievalPlan(
+            question_type,
+            requires_balanced_sources=True,
+            prefers_general_documents=prefers_general_documents,
+        )
 
     requires_complete_list = (
         question_type in {QuestionType.LIST, QuestionType.CONTENT}
         or _requires_complete_prohibition_list(question)
     )
     if requires_complete_list:
-        return RetrievalPlan(question_type, requires_complete_list=True)
+        return RetrievalPlan(
+            question_type,
+            requires_complete_list=True,
+            prefers_general_documents=prefers_general_documents,
+        )
 
     broader_context = requires_broader_context(question)
+    governing_context = (
+        question_type == QuestionType.CONDITION
+        and BROAD_CONDITION_PATTERN.search(normalized) is not None
+    )
     if question_type in {QuestionType.PROCEDURE, QuestionType.SUMMARY}:
         return RetrievalPlan(
             question_type,
             prefers_section_context=True,
             requires_broader_context=broader_context,
+            prefers_general_documents=prefers_general_documents,
         )
-    return RetrievalPlan(question_type, requires_broader_context=broader_context)
+    return RetrievalPlan(
+        question_type,
+        requires_broader_context=broader_context,
+        requires_governing_context=governing_context,
+        prefers_general_documents=prefers_general_documents,
+    )
 
 
 def _requires_complete_prohibition_list(question: str) -> bool:

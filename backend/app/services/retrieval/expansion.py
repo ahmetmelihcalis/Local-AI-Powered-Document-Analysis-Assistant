@@ -1,3 +1,5 @@
+import re
+
 import numpy as np
 
 from .questions import QuestionType, classify_question_type
@@ -41,6 +43,22 @@ PARAGRAPH_CONTRAST_BONUS = 0.12
 PARAGRAPH_TIMING_BONUS = 0.16
 PARAGRAPH_CONTENT_BONUS = 0.18
 PARAGRAPH_CONDITION_BONUS = 0.16
+CONDITION_RELATION_PATTERNS = (
+    re.compile(r"^\s*(?:\d+[.)]\s*)?notwithstanding\b", re.IGNORECASE),
+    re.compile(
+        r"^\s*(?:\d+[.)]\s*)?paragraph\s+\d+\s+shall\s+not\s+apply",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^\s*(?:\d+[.)]\s*)?except\b", re.IGNORECASE),
+    re.compile(
+        r"^\s*(?:\d+[.)]\s*)?(?:in\s+(?:the\s+)?cases|decisions?|"
+        r"the\s+(?:report|communication|requirement|obligation|rule))"
+        r".*?\breferred\s+to.*?\bparagraph\s+\d+",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bshall\s+not\s+be\s+required\b", re.IGNORECASE),
+    re.compile(r"\bfollowing\s+conditions\b", re.IGNORECASE),
+)
 
 
 def focused_clause_indices(chunks: list[dict], anchor_index: int) -> list[int]:
@@ -92,6 +110,40 @@ def focused_clause_indices(chunks: list[dict], anchor_index: int) -> list[int]:
         )
     ]
     return list(dict.fromkeys([*parents, *selected, *descendants]))
+
+
+def governing_condition_indices(chunks: list[dict], anchor_index: int) -> list[int]:
+    anchor = chunks[anchor_index]
+    if anchor["article"] is None:
+        return focused_clause_indices(chunks, anchor_index)
+
+    paragraph_indices: dict[str, list[int]] = {}
+    for index, chunk in enumerate(chunks):
+        if (
+            chunk["document_id"] == anchor["document_id"]
+            and chunk["article"] == anchor["article"]
+            and chunk["paragraph"] is not None
+        ):
+            paragraph_indices.setdefault(chunk["paragraph"], []).append(index)
+
+    selected: list[int] = []
+    for paragraph, indices in paragraph_indices.items():
+        content = "\n".join(chunks[index]["content"] for index in indices)
+        is_related_condition = any(
+            pattern.search(content) for pattern in CONDITION_RELATION_PATTERNS
+        )
+        if paragraph == "1" or is_related_condition:
+            parent_indices = [
+                index
+                for index in indices
+                if chunks[index]["point"] is None
+                and chunks[index]["subpoint"] is None
+            ]
+            if parent_indices:
+                parent_index = parent_indices[0]
+                selected.extend(focused_clause_indices(chunks, parent_index))
+
+    return selected or focused_clause_indices(chunks, anchor_index)
 
 
 def paragraph_anchor_index(

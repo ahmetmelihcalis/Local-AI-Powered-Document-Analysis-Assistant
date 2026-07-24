@@ -13,6 +13,7 @@ from app.services.foundry_service import create_embeddings
 from . import expansion, scoring
 from .questions import (
     QuestionType,
+    RetrievalPlan,
     build_retrieval_plan,
     enrich_question,
 )
@@ -129,6 +130,73 @@ def _legal_hierarchy_context_scores(question: str, chunks: list[dict]) -> np.nda
         for index in indices:
             scores[index] = coverage
     return scores
+
+
+def _preferred_general_document_index(
+    question: str,
+    plan: RetrievalPlan,
+    chunks: list[dict],
+    ranking_scores: np.ndarray,
+    similarities: np.ndarray,
+    definition_scores: np.ndarray,
+) -> int | None:
+    document_ids_with_articles = {
+        chunk["document_id"]
+        for chunk in chunks
+        if chunk["article"] is not None
+    }
+    if not document_ids_with_articles:
+        return None
+    candidates = [
+        index
+        for index, chunk in enumerate(chunks)
+        if chunk["document_id"] not in document_ids_with_articles
+    ]
+    if not candidates:
+        return None
+
+    candidate = max(
+        candidates,
+        key=lambda index: (
+            scoring.query_coverage(
+                question,
+                "\n".join(
+                    part
+                    for part in (chunks[index]["section"], chunks[index]["content"])
+                    if part
+                ),
+            ),
+            float(ranking_scores[index]),
+        ),
+    )
+    document = "\n".join(
+        part
+        for part in (chunks[candidate]["section"], chunks[candidate]["content"])
+        if part
+    )
+    is_relevant = (
+        scoring.query_coverage(question, document) >= scoring.MIN_QUERY_COVERAGE
+        or scoring.passes_relevance_gate(
+            question,
+            document,
+            float(similarities[candidate]),
+            float(definition_scores[candidate]),
+        )
+    )
+    if not is_relevant:
+        return None
+    if plan.question_type != QuestionType.SUMMARY:
+        return candidate
+
+    first_chunk = min(
+        (
+            index
+            for index in candidates
+            if chunks[index]["document_id"] == chunks[candidate]["document_id"]
+        ),
+        key=lambda index: chunks[index]["chunk_index"],
+    )
+    return first_chunk
 
 
 def _referenced_clause_target_index(
@@ -555,6 +623,7 @@ def retrieve_relevant_chunks(
         raise ValueError("The question cannot be empty.")
 
     question = enrich_question(question)
+    plan = build_retrieval_plan(question)
 
     if top_k < 1:
         raise ValueError("Top-K must be at least 1.")
@@ -668,6 +737,32 @@ def retrieve_relevant_chunks(
     ):
         original_top_index = semantic_top_index
 
+    preferred_general_document = None
+    if plan.prefers_general_documents:
+        preferred_general_document = _preferred_general_document_index(
+            question,
+            plan,
+            chunks,
+            base_ranking_scores,
+            similarities,
+            definition_scores,
+        )
+        if preferred_general_document is not None:
+            original_top_index = preferred_general_document
+            preferred_document_id = chunks[preferred_general_document]["document_id"]
+            ranked_indices = np.asarray(
+                [
+                    preferred_general_document,
+                    *(
+                        int(index)
+                        for index in ranked_indices
+                        if int(index) != preferred_general_document
+                        and chunks[int(index)]["document_id"] == preferred_document_id
+                    ),
+                ],
+                dtype=int,
+            )
+
     comparison_ranking_scores = (
         similarities
         + RETRIEVAL_SETTINGS.comparison_keyword_weight * keyword_scores
@@ -704,6 +799,7 @@ def retrieve_relevant_chunks(
         float(definition_scores[original_top_index]),
     ) and not (
         strong_lexical_anchor
+        or preferred_general_document == original_top_index
         or float(hierarchy_context_scores[original_top_index])
         >= RETRIEVAL_SETTINGS.hierarchy_context_anchor_min_coverage
     ):
@@ -726,7 +822,11 @@ def retrieve_relevant_chunks(
             )
         return _retrieved_chunks(chunks, selected_indices, similarities)
 
-    if scope == QuestionScope.COMPLETE_LIST:
+    general_document_list = (
+        plan.prefers_general_documents
+        and chunks[original_top_index]["article"] is None
+    )
+    if scope == QuestionScope.COMPLETE_LIST and not general_document_list:
         if chunks[original_top_index]["article"] is not None:
             anchor_index = original_top_index
         else:
@@ -773,6 +873,12 @@ def retrieve_relevant_chunks(
             return _retrieved_chunks(chunks, selected_indices, similarities)
 
     if chunks[original_top_index]["article"] is not None:
+        if plan.requires_governing_context:
+            selected_indices = expansion.governing_condition_indices(
+                chunks,
+                original_top_index,
+            )
+            return _retrieved_chunks(chunks, selected_indices, similarities)
         if chunks[original_top_index]["point"] is None:
             paragraph_anchor_index = expansion.paragraph_anchor_index(
                 expanded_question,
@@ -813,7 +919,6 @@ def retrieve_relevant_chunks(
         min_similarity,
         float(base_ranking_scores[original_top_index]) - max_score_drop,
     )
-    plan = build_retrieval_plan(question)
     list_question = plan.requires_complete_list
     section_context_question = plan.prefers_section_context
     if list_question or section_context_question or plan.requires_broader_context:

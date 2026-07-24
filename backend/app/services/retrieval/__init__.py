@@ -21,7 +21,6 @@ MIN_SIMILARITY = RETRIEVAL_SETTINGS.min_similarity
 
 
 def __getattr__(name: str):
-    """Keep internal test and integration imports working during the package split."""
     from . import service
 
     return getattr(service, name)

@@ -54,18 +54,23 @@ BASE_PROMPT = (
     f"{INSUFFICIENT_CONTEXT_TOKEN}. Otherwise, write the answer itself and never return "
     "a sufficiency label. Do not answer with merely related information."
 )
-DEFINITION_PROMPT = (
+LEGAL_DEFINITION_PROMPT = (
     "Return one sentence containing the formal definition. Preserve all legally "
     "material terms and qualifiers. Add no numbering, reference, example, or "
     "commentary."
 )
-FOCUSED_PROMPT = (
+GENERAL_DEFINITION_PROMPT = (
+    "Define the requested term in one or two clear sentences. Preserve technical "
+    "terms and exact details from the excerpts. Do not add examples, metadata, or "
+    "claims that are not supported by the excerpts."
+)
+LEGAL_FOCUSED_PROMPT = (
     "Answer only the selected legal clause in one to three concise sentences. "
     "Preserve its conditions, exceptions, and qualifiers. Do not discuss sibling "
     "clauses, mention the document or legal reference unless asked, or begin with a "
     "clause number."
 )
-LIST_PROMPT = (
+LEGAL_LIST_PROMPT = (
     "Give the complete list. If a parent clause supplies the governing rule, threshold, "
     "or conditions, state it first in one concise unnumbered sentence. Put every "
     "top-level clause on its own line using the labels shown in the context. Keep "
@@ -74,13 +79,25 @@ LIST_PROMPT = (
     "the excerpts in one concise sentence. Add no generic introduction, conclusion, "
     "invented label, document metadata, or unrelated clause."
 )
-GENERAL_PROMPT = (
-    "Answer the question directly and concisely without repeating metadata."
+GENERAL_LIST_PROMPT = (
+    "Give a complete, easy-to-scan answer using only the requested items from the "
+    "excerpts. Put distinct items on separate lines in source order. Do not include "
+    "document metadata, headings, generic introductions, or unsupported details."
 )
-SUMMARY_PROMPT = (
-    "Give a balanced, concise overview using the distinct sections supplied. "
-    "Cover the main purpose, components, and constraints that answer the question. "
-    "Do not repeat headings, document metadata, or near-duplicate details."
+GENERAL_ANSWER_PROMPT = (
+    "Give a direct, self-contained answer in plain English. Use one to three concise "
+    "sentences, preserve exact technical names and values, and omit document metadata. "
+    "Do not use Markdown headings, code fences, or unsupported claims."
+)
+GENERAL_PROCEDURE_PROMPT = (
+    "Give the procedure in source order. Use one clear step per line when the excerpts "
+    "contain distinct steps. Preserve commands, file names, and values exactly, but do "
+    "not use Markdown headings or code fences."
+)
+GENERAL_SUMMARY_PROMPT = (
+    "Give a balanced, self-contained overview in two to four concise sentences. Cover "
+    "only the purpose, components, and constraints supported by the excerpts. Do not "
+    "repeat headings, document metadata, or near-duplicate details."
 )
 GENERAL_RETRY_ISSUES = {
     "empty answer",
@@ -162,18 +179,27 @@ def _system_prompt(
     scope: QuestionScope,
     sources: list[RetrievedChunk],
 ) -> str:
+    legal_sources = _is_legal(sources)
+    plan = build_retrieval_plan(question)
     if scope == QuestionScope.DEFINITION:
-        instruction = DEFINITION_PROMPT
+        instruction = (
+            LEGAL_DEFINITION_PROMPT
+            if legal_sources
+            else GENERAL_DEFINITION_PROMPT
+        )
     elif scope == QuestionScope.COMPLETE_LIST:
         labels = _expected_labels(sources)
         required = f" Required labels: {', '.join(labels)}." if labels else ""
-        instruction = f"{LIST_PROMPT}{required}"
-    elif _is_legal(sources):
-        instruction = FOCUSED_PROMPT
-    elif build_retrieval_plan(question).requires_broader_context:
-        instruction = SUMMARY_PROMPT
+        list_prompt = LEGAL_LIST_PROMPT if legal_sources else GENERAL_LIST_PROMPT
+        instruction = f"{list_prompt}{required}"
+    elif legal_sources:
+        instruction = LEGAL_FOCUSED_PROMPT
+    elif plan.question_type == QuestionType.PROCEDURE:
+        instruction = GENERAL_PROCEDURE_PROMPT
+    elif plan.requires_broader_context:
+        instruction = GENERAL_SUMMARY_PROMPT
     else:
-        instruction = GENERAL_PROMPT
+        instruction = GENERAL_ANSWER_PROMPT
     return f"{BASE_PROMPT} {instruction}"
 
 
@@ -267,9 +293,10 @@ def _messages(
 
 
 def _generate_rag_answer(messages: list[dict[str, str]]) -> str:
-    if LIST_PROMPT in messages[0]["content"]:
+    prompt = messages[0]["content"]
+    if LEGAL_LIST_PROMPT in prompt or GENERAL_LIST_PROMPT in prompt:
         max_tokens = LIST_MAX_TOKENS
-    elif SUMMARY_PROMPT in messages[0]["content"]:
+    elif GENERAL_SUMMARY_PROMPT in prompt or GENERAL_PROCEDURE_PROMPT in prompt:
         max_tokens = SUMMARY_MAX_TOKENS
     else:
         max_tokens = ANSWER_MAX_TOKENS
