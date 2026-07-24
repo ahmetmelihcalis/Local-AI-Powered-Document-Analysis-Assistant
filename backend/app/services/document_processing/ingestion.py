@@ -4,6 +4,8 @@ from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
 
+from tokenizers import Tokenizer
+
 from app.database import DATABASE_PATH, DATA_DIR
 from app.repositories.document_repository import (
     ChunkInput,
@@ -15,18 +17,18 @@ from app.repositories.document_repository import (
     list_documents,
     update_document_status,
 )
-from app.services.chunking import TextChunk, chunk_text, load_tokenizer
-from app.services.document_readers import (
+from app.services.foundry_service import (
+    create_embeddings,
+    get_embedding_tokenizer_path,
+)
+from .chunking import TextChunk, chunk_text, load_tokenizer
+from .legal_parser import chunk_legal_pdf, is_legal_document
+from .readers import (
     DocumentText,
     read_docx_document,
     read_pdf_document,
     read_text_document,
 )
-from app.services.foundry_service import (
-    create_embeddings,
-    get_embedding_tokenizer_path,
-)
-from app.services.legal_parser import chunk_legal_pdf, is_legal_document
 
 
 MAX_FILE_SIZE = 10 * 1024 * 1024
@@ -90,60 +92,75 @@ def _group_docx_blocks(blocks: list[DocumentText]) -> list[DocumentText]:
 
 
 def _create_docx_outline(blocks: list[DocumentText]) -> str | None:
-    sections = list(
-        dict.fromkeys(block.section for block in blocks if block.section)
-    )
+    sections: list[str] = []
+
+    for block in blocks:
+        if block.section and block.section not in sections:
+            sections.append(block.section)
+
     return "\n\n".join(sections) if len(sections) > 1 else None
 
 
-def _create_chunks(filename: str, content: bytes, tokenizer) -> list[TextChunk]:
+def _create_chunks(
+    filename: str,
+    content: bytes,
+    tokenizer: Tokenizer,
+) -> list[TextChunk]:
     extension = Path(filename).suffix.lower()
 
     if extension in {".txt", ".md"}:
         return chunk_text(read_text_document(filename, content), tokenizer)
 
     if extension == ".pdf":
-        pages = read_pdf_document(content)
-        if is_legal_document(pages):
-            return chunk_legal_pdf(pages, tokenizer)
-
-        return [
-            chunk
-            for page in pages
-            for chunk in chunk_text(
-                page.text,
-                tokenizer,
-                page=page.page,
-                group_paragraphs=True,
-            )
-        ]
+        return _create_pdf_chunks(content, tokenizer)
 
     if extension == ".docx":
-        blocks = read_docx_document(content)
-        outline = _create_docx_outline(blocks)
-        outline_chunks = (
-            chunk_text(
-                outline,
-                tokenizer,
-                section="Document outline",
-                group_paragraphs=True,
-            )
-            if outline
-            else []
-        )
-        content_chunks = [
-            chunk
-            for block in _group_docx_blocks(blocks)
-            for chunk in chunk_text(
-                block.text,
-                tokenizer,
-                section=block.section,
-                group_paragraphs=True,
-            )
-        ]
-        return [*outline_chunks, *content_chunks]
+        return _create_docx_chunks(content, tokenizer)
 
     raise DocumentIngestionError("The document type is not supported.")
+
+
+def _create_pdf_chunks(content: bytes, tokenizer: Tokenizer) -> list[TextChunk]:
+    pages = read_pdf_document(content)
+    if is_legal_document(pages):
+        return chunk_legal_pdf(pages, tokenizer)
+
+    return [
+        chunk
+        for page in pages
+        for chunk in chunk_text(
+            page.text,
+            tokenizer,
+            page=page.page,
+            group_paragraphs=True,
+        )
+    ]
+
+
+def _create_docx_chunks(content: bytes, tokenizer: Tokenizer) -> list[TextChunk]:
+    blocks = read_docx_document(content)
+    outline = _create_docx_outline(blocks)
+    outline_chunks = (
+        chunk_text(
+            outline,
+            tokenizer,
+            section="Document outline",
+            group_paragraphs=True,
+        )
+        if outline
+        else []
+    )
+    content_chunks = [
+        chunk
+        for block in _group_docx_blocks(blocks)
+        for chunk in chunk_text(
+            block.text,
+            tokenizer,
+            section=block.section,
+            group_paragraphs=True,
+        )
+    ]
+    return [*outline_chunks, *content_chunks]
 
 
 def _create_document_embeddings(

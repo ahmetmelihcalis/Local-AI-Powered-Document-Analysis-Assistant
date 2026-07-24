@@ -9,6 +9,8 @@ TARGET_TOKENS = 250
 MAX_TOKENS = 350
 OVERLAP_TOKENS = 40
 HEADING_MAX_TOKENS = 20
+PARAGRAPH_BREAK = re.compile(r"\n\s*\n")
+SENTENCE_END = re.compile(r"[.!?]$")
 
 
 @dataclass
@@ -45,7 +47,11 @@ def chunk_text(
     if not 0 <= overlap_tokens < target_tokens <= max_tokens:
         raise ValueError("Chunk token limits are invalid.")
 
-    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+    paragraphs = [
+        paragraph.strip()
+        for paragraph in PARAGRAPH_BREAK.split(text)
+        if paragraph.strip()
+    ]
     units: list[str] = []
     pending_headings: list[str] = []
 
@@ -58,7 +64,7 @@ def chunk_text(
         )
         looks_like_heading = (
             paragraph_token_count <= HEADING_MAX_TOKENS
-            and not re.search(r"[.!?]$", paragraph)
+            and SENTENCE_END.search(paragraph) is None
         )
 
         if looks_like_heading:

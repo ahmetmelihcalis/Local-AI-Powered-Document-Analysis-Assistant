@@ -1,11 +1,9 @@
-"""Parse the structural hierarchy of legal documents before token chunking."""
-
 from dataclasses import dataclass, field
 
 from tokenizers import Tokenizer
 
-from app.services.chunking import TextChunk, chunk_text
-from app.services.document_readers import PageText
+from .chunking import TextChunk, chunk_text
+from .readers import PageText
 
 
 ROMAN_NUMERAL_CHARACTERS = frozenset("IVXLCDM")
@@ -218,28 +216,22 @@ class _LegalStructure:
     def enter_chapter(self, heading: str) -> None:
         self.chapter = heading
         self.section = None
-        self.article = None
-        self.article_title = None
-        self._reset_clauses()
+        self._clear_article_context()
         self.annex = None
 
     def enter_section(self, heading: str) -> None:
         self.section = heading
-        self.article = None
-        self.article_title = None
-        self._reset_clauses()
+        self._clear_article_context()
         self.annex = None
 
     def enter_article(self, heading: str) -> None:
+        self._clear_article_context()
         self.article = heading
-        self.article_title = None
-        self._reset_clauses()
         self.annex = None
 
     def enter_paragraph(self, marker: str) -> None:
+        self._reset_clauses()
         self.paragraph = marker
-        self.point = None
-        self.subpoint = None
 
     def enter_point(self, marker: str) -> None:
         self.point = marker
@@ -251,10 +243,13 @@ class _LegalStructure:
     def enter_annex(self, heading: str) -> None:
         self.chapter = None
         self.section = None
+        self._clear_article_context()
+        self.annex = heading
+
+    def _clear_article_context(self) -> None:
         self.article = None
         self.article_title = None
         self._reset_clauses()
-        self.annex = heading
 
     def _reset_clauses(self) -> None:
         self.paragraph = None
@@ -273,16 +268,13 @@ class _LegalBlockParser:
 
     def parse(self, pages: list[PageText]) -> list[LegalBlock]:
         for page in pages:
-            self._start_page(page.page)
+            self.current_page = page.page
+            self.current_lines = []
             for line in _clean_lines(page.text):
                 if not self._handle_heading(line):
                     self._append_content(line)
             self._finish_page()
         return self.blocks
-
-    def _start_page(self, page_number: int) -> None:
-        self.current_page = page_number
-        self.current_lines = []
 
     def _finish_page(self) -> None:
         if self.pending_headings and not self.current_lines:
@@ -323,13 +315,13 @@ class _LegalBlockParser:
         self._flush_block()
         self.structure.enter_chapter(heading)
         self.pending_headings = [heading]
-        self._heading_changed()
+        self.awaiting_article_title = False
 
     def _enter_section(self, heading: str) -> None:
         self._flush_block()
         self.structure.enter_section(heading)
         self.pending_headings.append(heading)
-        self._heading_changed()
+        self.awaiting_article_title = False
 
     def _enter_article(self, heading: str) -> None:
         self._flush_block()
@@ -343,35 +335,36 @@ class _LegalBlockParser:
         self.structure.enter_annex(heading)
         self.current_lines = [heading]
         self.pending_headings.clear()
-        self._heading_changed()
-
-    def _heading_changed(self) -> None:
         self.awaiting_article_title = False
 
     def _append_content(self, line: str) -> None:
         if self.awaiting_article_title:
             self._capture_article_title(line)
 
+        self._update_clause_position(line)
+
+        if not self.current_lines and self.pending_headings:
+            self.pending_headings.append(line)
+        else:
+            self.current_lines.append(line)
+
+    def _update_clause_position(self, line: str) -> None:
         paragraph = _paragraph_marker(line)
         if paragraph is not None:
             self._flush_block()
             self.structure.enter_paragraph(paragraph)
-        else:
-            marker = _parenthetical_marker(line)
-            if marker is not None:
-                starts_subpoint = self._starts_subpoint(marker)
-                self._flush_block()
-                if starts_subpoint:
-                    self.structure.enter_subpoint(marker)
-                else:
-                    self.structure.enter_point(marker)
+            return
 
-        if self.current_lines:
-            self.current_lines.append(line)
-        elif self.pending_headings:
-            self.pending_headings.append(line)
+        marker = _parenthetical_marker(line)
+        if marker is None:
+            return
+
+        starts_subpoint = self._starts_subpoint(marker)
+        self._flush_block()
+        if starts_subpoint:
+            self.structure.enter_subpoint(marker)
         else:
-            self.current_lines.append(line)
+            self.structure.enter_point(marker)
 
     def _capture_article_title(self, line: str) -> None:
         if _looks_like_article_title(line):

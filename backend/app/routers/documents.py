@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from app.repositories.document_repository import list_documents
-from app.services.document_ingestion import (
+from app.services.document_processing import (
     DocumentIngestionError,
     DuplicateDocumentError,
     delete_ingested_document,
