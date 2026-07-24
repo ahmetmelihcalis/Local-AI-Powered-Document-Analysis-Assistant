@@ -17,49 +17,43 @@ from .questions import (
     enrich_question,
 )
 
-# Internal orchestration helpers share the same tokenisation rules as scoring.
-_keyword_tokens = scoring.keyword_tokens
-_query_tokens = scoring.query_tokens
+@dataclass(frozen=True)
+class RetrievalSettings:
+    default_top_k: int = 4
+    min_similarity: float = 0.30
+    max_score_drop: float = 0.10
+    min_result_count: int = 2
+
+    keyword_weight: float = 0.12
+    query_expansion_weight: float = 0.08
+    comparison_keyword_weight: float = 0.25
+    phrase_match_weight: float = 0.20
+    definition_match_bonus: float = 0.15
+    legal_hierarchy_context_weight: float = 0.20
+    adjacent_chunk_bonus: float = 0.10
+
+    high_confidence_score: float = 0.50
+    medium_confidence_score: float = 0.35
+    hierarchy_context_anchor_min_coverage: float = 0.60
+    semantic_override_margin: float = 0.06
+    lexical_anchor_min_score: float = 0.75
+    lexical_anchor_min_coverage: float = 0.60
+    min_supplemental_query_coverage: float = 0.60
+    min_article_heading_coverage: float = 0.50
+
+    max_comparison_documents: int = 3
+    max_comparison_chunks_per_document: int = 2
+    unsectioned_context_window: int = 2
 
 
-DEFAULT_TOP_K = 4
-MIN_SIMILARITY = 0.30
-MAX_SCORE_DROP = 0.10
-KEYWORD_WEIGHT = 0.12
-QUERY_EXPANSION_WEIGHT = 0.08
-COMPARISON_KEYWORD_WEIGHT = 0.25
-PHRASE_MATCH_WEIGHT = 0.20
-DEFINITION_MATCH_BONUS = 0.15
-HIGH_CONFIDENCE_SCORE = 0.50
-MEDIUM_CONFIDENCE_SCORE = 0.35
-MIN_RESULT_COUNT = 2
-ADJACENT_CHUNK_BONUS = 0.10
-UNSECTIONED_CONTEXT_WINDOW = 2
-LEGAL_HIERARCHY_CONTEXT_WEIGHT = 0.20
-HIERARCHY_CONTEXT_ANCHOR_MIN_COVERAGE = 0.60
-SEMANTIC_OVERRIDE_MARGIN = 0.06
-LEXICAL_ANCHOR_MIN_SCORE = 0.75
-LEXICAL_ANCHOR_MIN_COVERAGE = 0.60
-MAX_COMPARISON_DOCUMENTS = 3
-MAX_COMPARISON_CHUNKS_PER_DOCUMENT = 2
-MIN_SUPPLEMENTAL_QUERY_COVERAGE = 0.60
-
-COMPARISON_PATTERNS = (
-    re.compile(r"\bcompar(?:e|ed|ing|ison)\b", re.IGNORECASE),
-    re.compile(r"\bdiffer(?:s|ed|ent|ently|ence|ences)?\b", re.IGNORECASE),
-    re.compile(r"\b(?:versus|vs\.?)\b", re.IGNORECASE),
-)
-
-ARTICLE_CITATION = re.compile(
-    r"\bArticle\s+(\d+[a-z]?)(?:\s*\(([0-9]+)\))?",
-    re.IGNORECASE,
-)
+RETRIEVAL_SETTINGS = RetrievalSettings()
 
 EXTERNAL_REGULATION_CITATION = re.compile(
     r"\bArticle\s+(\d+[a-z]?)\s+of\s+Regulation\s+"
     r"\(EU\)\s+(\d{4})\s*/\s*0*(\d+)",
     re.IGNORECASE,
 )
+
 
 class QuestionScope(StrEnum):
     DEFINITION = "definition"
@@ -112,13 +106,10 @@ def classify_question_scope(
         return QuestionScope.FOCUSED
     if plan.requires_complete_list:
         return QuestionScope.COMPLETE_LIST
-    if top_point is not None:
-        return QuestionScope.FOCUSED
     return QuestionScope.FOCUSED
 
 
 def _legal_hierarchy_context_scores(question: str, chunks: list[dict]) -> np.ndarray:
-    """Score a legal parent clause together with its child points when needed."""
     scores = np.zeros(len(chunks), dtype=np.float32)
     hierarchy_groups: dict[tuple[int, str, str], list[int]] = {}
     for index, chunk in enumerate(chunks):
@@ -147,7 +138,7 @@ def _referenced_clause_target_index(
     ranking_scores: np.ndarray,
 ) -> int | None:
     anchor = chunks[anchor_index]
-    query_tokens = set(_query_tokens(question))
+    query_tokens = set(scoring.query_tokens(question))
     reference_chunks = [anchor]
     if anchor["article"] is not None and anchor["paragraph"] is None:
         reference_chunks = [
@@ -159,13 +150,13 @@ def _referenced_clause_target_index(
 
     references: dict[tuple[str, str], tuple[float, int]] = {}
     for chunk in reference_chunks:
-        chunk_tokens = set(_keyword_tokens(chunk["content"]))
+        chunk_tokens = set(scoring.keyword_tokens(chunk["content"]))
         coverage = (
             len(query_tokens & chunk_tokens) / len(query_tokens)
             if query_tokens
             else 0.0
         )
-        for article_number, paragraph in ARTICLE_CITATION.findall(chunk["content"]):
+        for article_number, paragraph in scoring.ARTICLE_CITATION.findall(chunk["content"]):
             if str(anchor["article"]).casefold() == f"article {article_number}".casefold():
                 continue
             previous_coverage, frequency = references.get(
@@ -201,7 +192,7 @@ def _referenced_clause_target_index(
 
 
 def is_comparison_question(question: str) -> bool:
-    return any(pattern.search(question) for pattern in COMPARISON_PATTERNS)
+    return any(pattern.search(question) for pattern in scoring.COMPARISON_PATTERNS)
 
 
 def _article_heading_index(
@@ -209,7 +200,7 @@ def _article_heading_index(
     chunks: list[dict],
     ranking_scores: np.ndarray,
 ) -> int | None:
-    query_tokens = set(_query_tokens(question))
+    query_tokens = set(scoring.query_tokens(question))
     candidates: list[tuple[float, float, int]] = []
 
     for index, chunk in enumerate(chunks):
@@ -222,7 +213,7 @@ def _article_heading_index(
             continue
 
         heading_tokens = set(
-            _keyword_tokens(
+            scoring.keyword_tokens(
                 "\n".join(
                     part for part in (chunk["section"], chunk["content"]) if part
                 )
@@ -239,7 +230,11 @@ def _article_heading_index(
         return None
 
     coverage, _, index = max(candidates)
-    return index if coverage >= 0.5 else None
+    return (
+        index
+        if coverage >= RETRIEVAL_SETTINGS.min_article_heading_coverage
+        else None
+    )
 
 
 def _definition_indices(
@@ -269,6 +264,17 @@ def _retrieved_chunk(
         subpoint=chunk["subpoint"],
         score=score,
     )
+
+
+def _retrieved_chunks(
+    chunks: list[dict],
+    indices: list[int],
+    similarities: np.ndarray,
+) -> list[RetrievedChunk]:
+    return [
+        _retrieved_chunk(chunks[index], float(similarities[index]))
+        for index in indices
+    ]
 
 
 def _merged_retrieved_chunks(
@@ -305,13 +311,13 @@ def _merged_retrieved_chunks(
         results.append(base)
     return results
 
+
 def _external_reference_anchor(
     selected_indices: list[int],
     chunks: list[dict],
     selected_document_ids: set[int],
     ranking_scores: np.ndarray,
 ) -> tuple[int, int] | None:
-    """Resolve an EU Regulation citation into an article in another selected file."""
     for source_index in selected_indices:
         for article_number, year, regulation_number in (
             EXTERNAL_REGULATION_CITATION.findall(chunks[source_index]["content"])
@@ -368,14 +374,15 @@ def _comparison_clause_indices(
     anchor = chunks[anchor_index]
     plan = build_retrieval_plan(question)
     maximum_chunks = (
-        MAX_COMPARISON_CHUNKS_PER_DOCUMENT
+        RETRIEVAL_SETTINGS.max_comparison_chunks_per_document
         if plan.requires_complete_list or plan.requires_balanced_sources
         else 1
     )
     document_name_tokens = set().union(
         *(scoring.document_name_tokens(chunk["original_name"]) for chunk in chunks)
     )
-    topic_tokens = set(_query_tokens(question)) - document_name_tokens
+    question_tokens = set(scoring.query_tokens(question))
+    topic_tokens = question_tokens - document_name_tokens
     topic_tokens -= scoring.COMPARISON_META_TERMS
     if anchor["article"] is None:
         same_document = [
@@ -400,7 +407,7 @@ def _comparison_clause_indices(
         )
 
     broad_rule_question = any(
-        term in set(_query_tokens(question))
+        term in question_tokens
         for term in {"rule", "rules", "regulate", "regulates"}
     )
     if (
@@ -449,7 +456,7 @@ def _comparison_clause_indices(
         ):
             continue
         candidate_tokens = set(
-            _keyword_tokens(
+            scoring.keyword_tokens(
                 "\n".join(
                     part
                     for part in (chunks[index]["section"], chunks[index]["content"])
@@ -462,7 +469,7 @@ def _comparison_clause_indices(
             if topic_tokens
             else 0.0
         )
-        if coverage < MIN_SUPPLEMENTAL_QUERY_COVERAGE:
+        if coverage < RETRIEVAL_SETTINGS.min_supplemental_query_coverage:
             continue
         selected_indices.extend(expansion.focused_clause_indices(chunks, index))
         selected_articles.add(article)
@@ -492,52 +499,52 @@ def _comparison_indices(
         similarities,
         ranking_scores,
         min_similarity,
-        MAX_COMPARISON_DOCUMENTS,
+        RETRIEVAL_SETTINGS.max_comparison_documents,
     )
-    if selected_anchor_indices:
-        anchors = {
-            chunks[anchor_index]["document_id"]: anchor_index
-            for anchor_index in selected_anchor_indices
-        }
-        selected_document_ids = set(anchors)
-        for anchor_index in tuple(anchors.values()):
-            source_indices = _comparison_clause_indices(
+    if not selected_anchor_indices:
+        return []
+
+    anchors = {
+        chunks[anchor_index]["document_id"]: anchor_index
+        for anchor_index in selected_anchor_indices
+    }
+    selected_document_ids = set(anchors)
+    for anchor_index in tuple(anchors.values()):
+        source_indices = _comparison_clause_indices(
+            question,
+            chunks,
+            anchor_index,
+            ranking_scores,
+        )
+        external_reference = _external_reference_anchor(
+            source_indices,
+            chunks,
+            selected_document_ids,
+            ranking_scores,
+        )
+        if external_reference is not None:
+            target_document_id, target_anchor_index = external_reference
+            anchors[target_document_id] = target_anchor_index
+
+    comparison_indices: list[int] = []
+    for anchor_index in anchors.values():
+        comparison_indices.extend(
+            _comparison_clause_indices(
                 question,
                 chunks,
                 anchor_index,
                 ranking_scores,
             )
-            external_reference = _external_reference_anchor(
-                source_indices,
-                chunks,
-                selected_document_ids,
-                ranking_scores,
-            )
-            if external_reference is not None:
-                target_document_id, target_anchor_index = external_reference
-                anchors[target_document_id] = target_anchor_index
-
-        comparison_indices: list[int] = []
-        for anchor_index in anchors.values():
-            comparison_indices.extend(
-                _comparison_clause_indices(
-                    question,
-                    chunks,
-                    anchor_index,
-                    ranking_scores,
-                )
-            )
-        return list(dict.fromkeys(comparison_indices))
-
-    return []
+        )
+    return list(dict.fromkeys(comparison_indices))
 
 
 def retrieve_relevant_chunks(
     question: str,
     *,
-    top_k: int = DEFAULT_TOP_K,
-    min_similarity: float = MIN_SIMILARITY,
-    max_score_drop: float = MAX_SCORE_DROP,
+    top_k: int = RETRIEVAL_SETTINGS.default_top_k,
+    min_similarity: float = RETRIEVAL_SETTINGS.min_similarity,
+    max_score_drop: float = RETRIEVAL_SETTINGS.max_score_drop,
     database_path: Path = DATABASE_PATH,
     embedding_function: Callable[[list[str]], list[list[float]]] = create_embeddings,
     timings: dict[str, int] | None = None,
@@ -604,17 +611,22 @@ def retrieve_relevant_chunks(
         [chunk["content"] for chunk in chunks],
     )
     hierarchy_context_scores = _legal_hierarchy_context_scores(question, chunks)
+    question_type_adjustments = np.asarray(
+        [
+            scoring.question_type_adjustment(question, document)
+            for document in searchable_documents
+        ],
+        dtype=np.float32,
+    )
     base_ranking_scores = (
         similarities
-        + KEYWORD_WEIGHT * keyword_scores
-        + PHRASE_MATCH_WEIGHT * phrase_scores
-        + QUERY_EXPANSION_WEIGHT * expansion_scores
-        + DEFINITION_MATCH_BONUS * definition_scores
-        + LEGAL_HIERARCHY_CONTEXT_WEIGHT * hierarchy_context_scores
-    )
-    base_ranking_scores += np.asarray(
-        [scoring.question_type_adjustment(question, document) for document in searchable_documents],
-        dtype=np.float32,
+        + RETRIEVAL_SETTINGS.keyword_weight * keyword_scores
+        + RETRIEVAL_SETTINGS.phrase_match_weight * phrase_scores
+        + RETRIEVAL_SETTINGS.query_expansion_weight * expansion_scores
+        + RETRIEVAL_SETTINGS.definition_match_bonus * definition_scores
+        + RETRIEVAL_SETTINGS.legal_hierarchy_context_weight
+        * hierarchy_context_scores
+        + question_type_adjustments
     )
     ranked_indices = np.argsort(base_ranking_scores)[::-1]
     best_score = float(base_ranking_scores[ranked_indices[0]])
@@ -632,9 +644,9 @@ def retrieve_relevant_chunks(
             float(keyword_scores[lexical_top_index]),
             float(phrase_scores[lexical_top_index]),
         )
-        >= LEXICAL_ANCHOR_MIN_SCORE
+        >= RETRIEVAL_SETTINGS.lexical_anchor_min_score
         and scoring.query_coverage(question, lexical_document)
-        >= LEXICAL_ANCHOR_MIN_COVERAGE
+        >= RETRIEVAL_SETTINGS.lexical_anchor_min_coverage
     )
     if best_score < min_similarity and not strong_lexical_anchor:
         return []
@@ -647,26 +659,23 @@ def retrieve_relevant_chunks(
     if (
         explicit_query_anchor is None
         and not strong_lexical_anchor
-        and scoring.question_type_adjustment(question, searchable_documents[semantic_top_index])
-        >= 0
+        and question_type_adjustments[semantic_top_index] >= 0
         and float(hierarchy_context_scores[original_top_index])
-        < HIERARCHY_CONTEXT_ANCHOR_MIN_COVERAGE
+        < RETRIEVAL_SETTINGS.hierarchy_context_anchor_min_coverage
         and float(similarities[semantic_top_index])
         - float(similarities[original_top_index])
-        >= SEMANTIC_OVERRIDE_MARGIN
+        >= RETRIEVAL_SETTINGS.semantic_override_margin
     ):
         original_top_index = semantic_top_index
 
     comparison_ranking_scores = (
         similarities
-        + COMPARISON_KEYWORD_WEIGHT * keyword_scores
-        + PHRASE_MATCH_WEIGHT * phrase_scores
-        + DEFINITION_MATCH_BONUS * definition_scores
-        + LEGAL_HIERARCHY_CONTEXT_WEIGHT * hierarchy_context_scores
-    )
-    comparison_ranking_scores += np.asarray(
-        [scoring.question_type_adjustment(question, document) for document in searchable_documents],
-        dtype=np.float32,
+        + RETRIEVAL_SETTINGS.comparison_keyword_weight * keyword_scores
+        + RETRIEVAL_SETTINGS.phrase_match_weight * phrase_scores
+        + RETRIEVAL_SETTINGS.definition_match_bonus * definition_scores
+        + RETRIEVAL_SETTINGS.legal_hierarchy_context_weight
+        * hierarchy_context_scores
+        + question_type_adjustments
     )
     comparison_indices = _comparison_indices(
         question,
@@ -687,14 +696,7 @@ def retrieve_relevant_chunks(
     )
     if reference_target_index is not None:
         original_top_index = reference_target_index
-    top_document = "\n".join(
-        part
-        for part in (
-            chunks[original_top_index]["section"],
-            chunks[original_top_index]["content"],
-        )
-        if part
-    )
+    top_document = searchable_documents[original_top_index]
     if not scoring.passes_relevance_gate(
         expanded_question,
         top_document,
@@ -703,15 +705,16 @@ def retrieve_relevant_chunks(
     ) and not (
         strong_lexical_anchor
         or float(hierarchy_context_scores[original_top_index])
-        >= HIERARCHY_CONTEXT_ANCHOR_MIN_COVERAGE
+        >= RETRIEVAL_SETTINGS.hierarchy_context_anchor_min_coverage
     ):
         return []
 
     if reference_target_index is not None:
-        return [
-            _retrieved_chunk(chunks[index], float(similarities[index]))
-            for index in expansion.focused_clause_indices(chunks, original_top_index)
-        ]
+        return _retrieved_chunks(
+            chunks,
+            expansion.focused_clause_indices(chunks, original_top_index),
+            similarities,
+        )
 
     scope = classify_question_scope(question, chunks[original_top_index]["point"])
     if scope == QuestionScope.DEFINITION:
@@ -721,10 +724,7 @@ def retrieve_relevant_chunks(
                 chunks,
                 selected_indices[0],
             )
-        return [
-            _retrieved_chunk(chunks[index], float(similarities[index]))
-            for index in selected_indices
-        ]
+        return _retrieved_chunks(chunks, selected_indices, similarities)
 
     if scope == QuestionScope.COMPLETE_LIST:
         if chunks[original_top_index]["article"] is not None:
@@ -770,10 +770,7 @@ def retrieve_relevant_chunks(
                 selected_indices = list(
                     dict.fromkeys([*dependent_indices, *parent_indices])
                 )
-            return [
-                _retrieved_chunk(chunks[index], float(similarities[index]))
-                for index in selected_indices
-            ]
+            return _retrieved_chunks(chunks, selected_indices, similarities)
 
     if chunks[original_top_index]["article"] is not None:
         if chunks[original_top_index]["point"] is None:
@@ -796,10 +793,7 @@ def retrieve_relevant_chunks(
                 )
         else:
             selected_indices = expansion.focused_clause_indices(chunks, original_top_index)
-        return [
-            _retrieved_chunk(chunks[index], float(similarities[index]))
-            for index in selected_indices
-        ]
+        return _retrieved_chunks(chunks, selected_indices, similarities)
 
     if strong_lexical_anchor:
         ranked_indices = np.asarray(
@@ -824,9 +818,9 @@ def retrieve_relevant_chunks(
     section_context_question = plan.prefers_section_context
     if list_question or section_context_question or plan.requires_broader_context:
         result_limit = top_k
-    elif best_score >= HIGH_CONFIDENCE_SCORE:
+    elif best_score >= RETRIEVAL_SETTINGS.high_confidence_score:
         result_limit = min(top_k, 2)
-    elif best_score >= MEDIUM_CONFIDENCE_SCORE:
+    elif best_score >= RETRIEVAL_SETTINGS.medium_confidence_score:
         result_limit = min(top_k, 3)
     else:
         result_limit = top_k
@@ -848,13 +842,13 @@ def retrieve_relevant_chunks(
             nearby_unsectioned_context = (
                 top_chunk["section"] is None
                 and section_context_question
-                and distance <= UNSECTIONED_CONTEXT_WINDOW
+                and distance <= RETRIEVAL_SETTINGS.unsectioned_context_window
             )
             if same_section and (distance == 1 or list_question or section_context_question):
-                ranking_scores[index] += ADJACENT_CHUNK_BONUS / distance
+                ranking_scores[index] += RETRIEVAL_SETTINGS.adjacent_chunk_bonus / distance
                 related_indices.add(index)
             elif nearby_unsectioned_context:
-                ranking_scores[index] += ADJACENT_CHUNK_BONUS / distance
+                ranking_scores[index] += RETRIEVAL_SETTINGS.adjacent_chunk_bonus / distance
                 related_indices.add(index)
 
         remaining_indices = [
@@ -884,7 +878,10 @@ def retrieve_relevant_chunks(
         score = float(similarities[index])
         if (
             float(base_ranking_scores[index]) < accepted_score
-            and len(results) >= min(MIN_RESULT_COUNT, result_limit)
+            and len(results) >= min(
+                RETRIEVAL_SETTINGS.min_result_count,
+                result_limit,
+            )
             and not (
                 (list_question or section_context_question)
                 and int(index) in related_indices
@@ -892,22 +889,7 @@ def retrieve_relevant_chunks(
         ):
             break
 
-        chunk = chunks[int(index)]
-        results.append(
-            RetrievedChunk(
-                chunk_id=chunk["id"],
-                document_id=chunk["document_id"],
-                file_name=chunk["original_name"],
-                content=chunk["content"],
-                page_number=chunk["page_number"],
-                section=chunk["section"],
-                article=chunk["article"],
-                paragraph=chunk["paragraph"],
-                point=chunk["point"],
-                subpoint=chunk["subpoint"],
-                score=score,
-            )
-        )
+        results.append(_retrieved_chunk(chunks[int(index)], score))
 
         if len(results) == result_limit:
             break

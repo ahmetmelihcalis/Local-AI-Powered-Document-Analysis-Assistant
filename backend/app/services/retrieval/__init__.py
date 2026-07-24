@@ -1,7 +1,6 @@
 from .service import (
-    DEFAULT_TOP_K,
-    MIN_SIMILARITY,
     QuestionScope,
+    RETRIEVAL_SETTINGS,
     RetrievedChunk,
     classify_question_scope,
     is_comparison_question,
@@ -16,6 +15,9 @@ from .scoring import (
     mentions_multiple_documents,
     question_type_adjustment as _question_type_adjustment,
 )
+
+DEFAULT_TOP_K = RETRIEVAL_SETTINGS.default_top_k
+MIN_SIMILARITY = RETRIEVAL_SETTINGS.min_similarity
 
 
 def __getattr__(name: str):

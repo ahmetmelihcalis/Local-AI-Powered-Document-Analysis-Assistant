@@ -1,5 +1,3 @@
-"""Classify a question's intent before retrieval selects supporting context."""
-
 import re
 from dataclasses import dataclass
 from enum import StrEnum
@@ -16,6 +14,17 @@ class QuestionType(StrEnum):
     SUMMARY = "summary"
     GENERAL = "general"
 
+
+WORD_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
+AI_INTERACTION_PATTERN = re.compile(
+    r"\b(?:talking|speaking)\s+to\s+(?:an?\s+)?ai\b",
+    re.IGNORECASE,
+)
+PROJECT_SUMMARY_PATTERN = re.compile(r"^what is .+ about$", re.IGNORECASE)
+BROAD_PROHIBITION_PATTERN = re.compile(
+    r"\b(?:practices|systems|activities|uses)\b",
+    re.IGNORECASE,
+)
 
 COMPARISON_PATTERNS = (
     re.compile(r"\bcompar(?:e|ed|ing|ison)\b", re.IGNORECASE),
@@ -57,7 +66,6 @@ QUESTION_REPLACEMENTS = {
     "theres": "there is",
     "u": "you",
 }
-
 QUESTION_EXPANSIONS = {
     "banned": ("prohibited", "prohibition"),
     "breach": ("personal data breach",),
@@ -68,7 +76,6 @@ QUESTION_EXPANSIONS = {
     "tell": ("notify", "communicate", "inform"),
     "users": ("persons", "individuals", "data subjects"),
 }
-
 DETAIL_CONTEXT_TERMS = {
     "advantages",
     "analytics",
@@ -86,7 +93,6 @@ DETAIL_CONTEXT_TERMS = {
     "technologies",
     "workflow",
 }
-
 PROHIBITION_SUBJECT_STOP_WORDS = {
     "are",
     "banned",
@@ -117,8 +123,7 @@ class RetrievalPlan:
 
 def normalize_question(question: str) -> str:
     normalized = " ".join(question.casefold().strip(" ?.!\t\n").split())
-    normalized = re.sub(
-        r"\b(?:talking|speaking)\s+to\s+(?:an?\s+)?ai\b",
+    normalized = AI_INTERACTION_PATTERN.sub(
         "interacting with an ai system",
         normalized,
     )
@@ -130,7 +135,7 @@ def enrich_question(question: str) -> str:
     normalized = normalize_question(question)
     expansions = [
         term
-        for token in re.findall(r"[^\W_]+", normalized, flags=re.UNICODE)
+        for token in _words(normalized)
         for term in QUESTION_EXPANSIONS.get(token, ())
     ]
     return " ".join((normalized, *dict.fromkeys(expansions)))
@@ -138,23 +143,21 @@ def enrich_question(question: str) -> str:
 
 def classify_question_type(question: str) -> QuestionType:
     normalized = normalize_question(question)
-    if any(pattern.search(normalized) for pattern in COMPARISON_PATTERNS):
+    if _matches_any(normalized, COMPARISON_PATTERNS):
         return QuestionType.COMPARISON
-    if any(pattern.search(normalized) for pattern in SUMMARY_PATTERNS):
+    if _matches_any(normalized, SUMMARY_PATTERNS) or PROJECT_SUMMARY_PATTERN.match(normalized):
         return QuestionType.SUMMARY
-    if any(pattern.search(normalized) for pattern in PROCEDURE_PATTERNS):
+    if _matches_any(normalized, PROCEDURE_PATTERNS):
         return QuestionType.PROCEDURE
-    if re.match(r"^what is .+ about$", normalized):
-        return QuestionType.SUMMARY
     if normalized.startswith("what is "):
         return QuestionType.DEFINITION
-    if any(pattern.search(normalized) for pattern in CONTENT_PATTERNS):
+    if _matches_any(normalized, CONTENT_PATTERNS):
         return QuestionType.CONTENT
-    if any(pattern.search(normalized) for pattern in CONDITION_PATTERNS):
+    if _matches_any(normalized, CONDITION_PATTERNS):
         return QuestionType.CONDITION
     if "list" in normalized:
         return QuestionType.LIST
-    if any(pattern.search(normalized) for pattern in OBLIGATION_PATTERNS):
+    if _matches_any(normalized, OBLIGATION_PATTERNS):
         return QuestionType.OBLIGATION
     if normalized.startswith(("what are ", "which ")):
         return QuestionType.LIST
@@ -163,33 +166,25 @@ def classify_question_type(question: str) -> QuestionType:
 
 def requires_broader_context(question: str) -> bool:
     normalized = normalize_question(question)
-    tokens = set(re.findall(r"[^\W_]+", normalized, flags=re.UNICODE))
-    detail_terms = tokens & DETAIL_CONTEXT_TERMS
-    has_multiple_aspects = " and " in normalized and len(tokens) >= 8
+    question_terms = set(_words(normalized))
+    detail_terms = question_terms & DETAIL_CONTEXT_TERMS
+    has_multiple_aspects = " and " in normalized and len(question_terms) >= 8
     return len(detail_terms) >= 2 or (bool(detail_terms) and has_multiple_aspects)
 
 
 def build_retrieval_plan(question: str) -> RetrievalPlan:
     question_type = classify_question_type(question)
-    broader_context = requires_broader_context(question)
     if question_type == QuestionType.COMPARISON:
-        return RetrievalPlan(
-            question_type,
-            requires_balanced_sources=True,
-        )
-    if question_type in {QuestionType.LIST, QuestionType.CONTENT}:
+        return RetrievalPlan(question_type, requires_balanced_sources=True)
+
+    requires_complete_list = (
+        question_type in {QuestionType.LIST, QuestionType.CONTENT}
+        or _requires_complete_prohibition_list(question)
+    )
+    if requires_complete_list:
         return RetrievalPlan(question_type, requires_complete_list=True)
-    normalized = normalize_question(question)
-    if ("banned" in normalized or "prohibited" in normalized) and re.search(
-        r"\b(?:practices|systems|activities|uses)\b", normalized
-    ):
-        subject_terms = {
-            token
-            for token in re.findall(r"[^\W_]+", normalized, flags=re.UNICODE)
-            if token not in PROHIBITION_SUBJECT_STOP_WORDS
-        }
-        if subject_terms <= {"ai", "system"}:
-            return RetrievalPlan(question_type, requires_complete_list=True)
+
+    broader_context = requires_broader_context(question)
     if question_type in {QuestionType.PROCEDURE, QuestionType.SUMMARY}:
         return RetrievalPlan(
             question_type,
@@ -197,3 +192,25 @@ def build_retrieval_plan(question: str) -> RetrievalPlan:
             requires_broader_context=broader_context,
         )
     return RetrievalPlan(question_type, requires_broader_context=broader_context)
+
+
+def _requires_complete_prohibition_list(question: str) -> bool:
+    normalized = normalize_question(question)
+    asks_about_prohibitions = "banned" in normalized or "prohibited" in normalized
+    if not asks_about_prohibitions or not BROAD_PROHIBITION_PATTERN.search(normalized):
+        return False
+
+    subject_terms = {
+        token
+        for token in _words(normalized)
+        if token not in PROHIBITION_SUBJECT_STOP_WORDS
+    }
+    return subject_terms <= {"ai", "system"}
+
+
+def _matches_any(text: str, patterns: tuple[re.Pattern[str], ...]) -> bool:
+    return any(pattern.search(text) for pattern in patterns)
+
+
+def _words(text: str) -> list[str]:
+    return WORD_PATTERN.findall(text)
