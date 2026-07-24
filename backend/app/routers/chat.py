@@ -1,10 +1,11 @@
 import logging
 from time import perf_counter
+
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
-from app.services.rag_service import answer_question
+from app.services.rag import answer_question
 
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
