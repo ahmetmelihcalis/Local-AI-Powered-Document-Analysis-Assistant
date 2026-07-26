@@ -1,7 +1,8 @@
 import unittest
-import numpy as np
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+import numpy as np
 
 from app.database import initialize_database
 from app.services.document_processing.readers import PageText
