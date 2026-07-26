@@ -23,8 +23,8 @@ type ChatMessage = {
 
 const LEGAL_EXAMPLE_QUESTIONS = [
   "What is an AI system?",
-  "What information must a personal data breach notification contain?",
   "When must a personal data breach be communicated to the data subject?",
+  "When must a controller notify the supervisory authority of a personal data breach?",
 ];
 
 const GENERAL_EXAMPLE_QUESTION = "What is this document about?";
@@ -451,7 +451,7 @@ export default function App() {
               value={question}
               onChange={(event) => setQuestion(event.target.value)}
               placeholder="Ask a question about your documents…"
-              rows={2}
+              rows={1}
               maxLength={2000}
               disabled={isSending}
             />
