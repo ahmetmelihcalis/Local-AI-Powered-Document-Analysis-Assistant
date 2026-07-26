@@ -1,17 +1,16 @@
 .DS_Store
+
 .env
-.venv/
+backend/.venv/
+
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
-*.tsbuildinfo
 
-backend/data/documents/*
-!backend/data/documents/.gitkeep
-backend/data/rag.db
-backend/tests/*
-!backend/tests/.gitkeep
+backend/data/
+backend/tests/
 
 frontend/node_modules/
 frontend/dist/
+*.tsbuildinfo

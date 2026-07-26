@@ -20,6 +20,12 @@ The application also supports general TXT, Markdown, PDF, and DOCX documents. Wh
 
 The retrieval pipeline is specifically optimized for two documents: **Regulation (EU) 2024/1689** (the EU AI Act) and **Regulation (EU) 2016/679** (the GDPR). For legal questions, the application identifies the question type and selects the relevant legal scope before answering, and can expand a selected clause with its parent context, related conditions, exceptions, and list items when needed.
 
+## Screenshots
+
+![Application Screenshot](docs/1.jpeg)
+![Application Screenshot](docs/2.jpeg)
+![Application Screenshot](docs/3.jpeg)
+
 ## Technology Stack
 
 | Area | Technology |
