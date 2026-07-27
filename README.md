@@ -84,20 +84,28 @@ This application uses retrieval-augmented generation (RAG): it retrieves relevan
 ### Project Structure
 
 ```text
-backend/
-├── app/
-│   ├── main.py                  FastAPI application entry point
-│   ├── routers/                 Chat and document API endpoints
-│   ├── repositories/            SQLite data access
-│   └── services/
-│       ├── document_processing/ Document reading, parsing, chunking, and ingestion
-│       ├── retrieval/           Question planning, scoring, and context expansion
-│       └── rag/                 Answer generation and validation
-└── data/                        Local database and uploaded documents
-
-frontend/
-└── src/                         React interface and API client
+.
+├── backend/
+│   ├── app/
+│   │   ├── main.py                  FastAPI application entry point
+│   │   ├── database.py              SQLite initialization
+│   │   ├── routers/                 Chat and document API endpoints
+│   │   ├── repositories/            SQLite data access
+│   │   └── services/
+│   │       ├── document_processing/ Document reading, parsing, chunking, and ingestion
+│   │       ├── retrieval/           Question planning, scoring, and context expansion
+│   │       └── rag/                 Answer generation and validation
+│   └── tests/                       Core RAG and legal-retrieval tests
+│
+├── frontend/
+│   └── src/                         React interface and API client
+│
+├── docs/                            README screenshots
+├── README.md
+└── .gitignore
 ```
+
+At runtime, the backend creates `backend/data/` for the local SQLite database and uploaded documents. This folder is excluded from version control.
 
 ### Supported Documents and Storage
 
